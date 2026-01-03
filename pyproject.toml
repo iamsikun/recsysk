@@ -1,0 +1,35 @@
+[build-system]
+requires = ["setuptools>=61.0", "wheel", "numpy>=2.3.4"]
+build-backend = "setuptools.build_meta"
+
+
+[project]
+name = "recsys"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.13"
+dependencies = [
+    "numpy>=2.4.0",
+    "pandas>=2.3.3",
+    "scikit-learn>=1.8.0",
+    "torch>=2.9.1",
+]
+
+[project.urls]
+Homepage = "https://github.com/iamsikun/latentflow"
+Repository = "https://github.com/iamsikun/latentflow"
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[dependency-groups]
+dev = [
+    "ipykernel>=7.1.0",
+    "jupyterlab>=4.4.10",
+    "notebook>=7.4.7",
+    "pytest>=8.4.2",
+]
