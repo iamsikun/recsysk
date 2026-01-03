@@ -1,511 +1,555 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
+from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Callable, Iterable, Mapping
 from urllib.request import urlretrieve
 import zipfile
-import pandas as pd
+import shutil
+
+import polars as pl
 
 
 class DataLoader(ABC):
-    """Abstract Base Class for Data Loading"""
-    @abstractmethod
-    def load_data(self):
-        pass
-    
-    def get_stats(self, df):
-        """Calculate dataset statistics."""
-        n_users = df['user_id'].nunique()
-        n_items = df['item_id'].nunique()
-        n_ratings = len(df)
-        sparsity = 1 - (n_ratings / (n_users * n_items))
-        return {
-            'n_users': n_users, 
-            'n_items': n_items, 
-            'n_ratings': n_ratings, 
-            'sparsity': f"{sparsity:.4%}"
-        }
-
-
-class MovieLensDownloader:
     """
-    Unified downloader for all MovieLens datasets.
-    Handles downloading and extracting zip files.
+    Minimal abstract interface for dataset loaders.
+
+    Every concrete loader should expose a `load` entrypoint that returns the
+    relevant tables for a dataset. Additional utilities can be added as static
+    methods to avoid growing separate helper modules.
     """
-    DATA_URL_DICT: dict[str, str] = {
-        "100k": "https://files.grouplens.org/datasets/movielens/ml-100k.zip",
-        "1m": "https://files.grouplens.org/datasets/movielens/ml-1m.zip",
-        "10m": "https://files.grouplens.org/datasets/movielens/ml-10m.zip",
-        "20m": "https://files.grouplens.org/datasets/movielens/ml-20m.zip",
-        "32m": "https://files.grouplens.org/datasets/movielens/ml-32m.zip",
-    }
-    
-    # Get project root (two levels up from this file: src/recsys/data.py -> root)
-    _PROJECT_ROOT = Path(__file__).parent.parent.parent
-    DATA_BASE_PATH = _PROJECT_ROOT / "data" / "movielens"
 
-    def download_and_extract(self, size: str):
+    @abstractmethod
+    def load(self, *args, **kwargs):
         """
-        Downloads and extracts the MovieLens dataset of the given size if not already present.
-        
-        Args:
-            size: Dataset size ('100k', '1m', '10m', '20m', '32m')
+        Load one or more tables for a dataset.
+
+        Subclasses are expected to document their supported parameters and the
+        structure of the returned data.
         """
-        size_lc = size.lower()
-        if size_lc not in self.DATA_URL_DICT:
-            raise ValueError(f"Unsupported dataset size: {size}")
-        
-        extract_dir = self.DATA_BASE_PATH / f"ml-{size_lc}"
-        
-        # Check if extract directory exists and is not empty
-        if extract_dir.exists() and any(extract_dir.iterdir()):
-            print(f"Data already extracted at: {extract_dir}")
-            return
+        msg = "Subclasses must implement the load method"
+        raise NotImplementedError(msg)
 
-        url = self.DATA_URL_DICT[size_lc]
-        archive_name = f"ml-{size_lc}.zip"
-        full_archive_path = self.DATA_BASE_PATH / archive_name
+    @staticmethod
+    def get_stats(df: pl.DataFrame) -> dict[str, float | str]:
+        """Calculate basic sparsity statistics for a ratings DataFrame."""
 
-        # Create data directory if it doesn't exist
-        self.DATA_BASE_PATH.mkdir(parents=True, exist_ok=True)
-        
-        print(f"Downloading MovieLens {size} from {url}...")
-        urlretrieve(url, full_archive_path)
-        
-        print("Extracting zip...")
-        with zipfile.ZipFile(full_archive_path, "r") as zip_ref:
-            # Get the root directory name from the zip file
-            zip_names = zip_ref.namelist()
-            if not zip_names:
-                raise ValueError(f"Empty zip file: {archive_name}")
-            
-            # Find the root directory (first path component)
-            root_dir_name = None
-            for name in zip_names:
-                if '/' in name:
-                    root_dir_name = name.split('/')[0]
-                    break
-            
-            # Extract the zip
-            zip_ref.extractall(self.DATA_BASE_PATH)
-            
-            # Rename the extracted directory to the expected name
-            if root_dir_name:
-                extracted_dir = self.DATA_BASE_PATH / root_dir_name
-                if extracted_dir.exists() and extracted_dir != extract_dir:
-                    extracted_dir.rename(extract_dir)
-        
-        # Clean up archive
-        full_archive_path.unlink()
-        print(f"Download and extraction complete for MovieLens {size}.")
+        if not {"user_id", "item_id"}.issubset(df.columns):
+            raise ValueError("ratings dataframe must include 'user_id' and 'item_id' columns")
 
-
-class MovieLensProcessor(ABC):
-    """Abstract base class for MovieLens dataset processors."""
-    
-    def __init__(self, data_base_path: Path):
-        self.data_base_path = data_base_path
-    
-    @abstractmethod
-    def load_ratings(self) -> pd.DataFrame:
-        """Load ratings data into a DataFrame."""
-        pass
-    
-    @abstractmethod
-    def get_extract_dir(self) -> Path:
-        """Get the extraction directory for this dataset."""
-        pass
-    
-    @abstractmethod
-    def load_all(self) -> dict[str, pd.DataFrame]:
-        """Load all available data for this dataset into a dictionary."""
-        pass
-
-
-class MovieLens100kProcessor(MovieLensProcessor):
-    """Processor for MovieLens 100k dataset."""
-    
-    def get_extract_dir(self) -> Path:
-        return self.data_base_path / "ml-100k"
-    
-    def load_ratings(self) -> pd.DataFrame:
-        """Load ratings from u.data file."""
-        extract_dir = self.get_extract_dir()
-        file_path = extract_dir / "u.data"
-        
-        if not file_path.exists():
-            raise FileNotFoundError(f"Ratings file not found: {file_path}")
-        
-        df = pd.read_csv(
-            file_path,
-            sep='\t',
-            names=['user_id', 'item_id', 'rating', 'timestamp'],
-            header=None,
-            engine='python'
-        )
-        df['timestamp'] = pd.to_datetime(df['timestamp'], unit='s', errors='coerce')
-        return df
-    
-    def load_movies(self) -> pd.DataFrame:
-        """Load movie information from u.item file."""
-        extract_dir = self.get_extract_dir()
-        file_path = extract_dir / "u.item"
-        
-        if not file_path.exists():
-            raise FileNotFoundError(f"Movies file not found: {file_path}")
-        
-        # u.item format: movie id | title | release date | video release date | IMDb URL | genres (19 binary)
-        df = pd.read_csv(
-            file_path,
-            sep='|',
-            encoding='latin-1',
-            header=None,
-            engine='python'
-        )
-        # First 5 columns: id, title, release_date, video_release_date, imdb_url
-        # Remaining 19 columns are genres
-        genre_cols = [
-            'unknown', 'Action', 'Adventure', 'Animation', "Children's",
-            'Comedy', 'Crime', 'Documentary', 'Drama', 'Fantasy',
-            'Film-Noir', 'Horror', 'Musical', 'Mystery', 'Romance',
-            'Sci-Fi', 'Thriller', 'War', 'Western'
-        ]
-        df.columns = ['item_id', 'title', 'release_date', 'video_release_date', 'imdb_url'] + genre_cols
-        return df
-    
-    def load_users(self) -> pd.DataFrame:
-        """Load user information from u.user file."""
-        extract_dir = self.get_extract_dir()
-        file_path = extract_dir / "u.user"
-        
-        if not file_path.exists():
-            raise FileNotFoundError(f"Users file not found: {file_path}")
-        
-        df = pd.read_csv(
-            file_path,
-            sep='|',
-            names=['user_id', 'age', 'gender', 'occupation', 'zip_code'],
-            header=None,
-            engine='python'
-        )
-        return df
-    
-    def load_all(self) -> dict[str, pd.DataFrame]:
-        """Load all available data for the 100k dataset."""
+        n_users = df["user_id"].n_unique()
+        n_items = df["item_id"].n_unique()
+        n_ratings = df.height
+        sparsity = 1 - (n_ratings / (n_users * n_items)) if n_users and n_items else 1.0
         return {
-            'ratings': self.load_ratings(),
-            'movies': self.load_movies(),
-            'users': self.load_users(),
+            "n_users": n_users,
+            "n_items": n_items,
+            "n_ratings": n_ratings,
+            "sparsity": f"{sparsity:.4%}",
         }
 
 
-class MovieLens1mProcessor(MovieLensProcessor):
-    """Processor for MovieLens 1m dataset."""
-    
-    def get_extract_dir(self) -> Path:
-        return self.data_base_path / "ml-1m"
-    
-    def load_ratings(self) -> pd.DataFrame:
-        """Load ratings from ratings.dat file."""
-        extract_dir = self.get_extract_dir()
-        file_path = extract_dir / "ratings.dat"
-        
-        if not file_path.exists():
-            raise FileNotFoundError(f"Ratings file not found: {file_path}")
-        
-        df = pd.read_csv(
-            file_path,
-            sep='::',
-            names=['user_id', 'item_id', 'rating', 'timestamp'],
-            header=None,
-            engine='python'
-        )
-        df['timestamp'] = pd.to_datetime(df['timestamp'], unit='s', errors='coerce')
-        return df
-    
-    def load_movies(self) -> pd.DataFrame:
-        """Load movie information from movies.dat file."""
-        extract_dir = self.get_extract_dir()
-        file_path = extract_dir / "movies.dat"
-        
-        if not file_path.exists():
-            raise FileNotFoundError(f"Movies file not found: {file_path}")
-        
-        df = pd.read_csv(
-            file_path,
-            sep='::',
-            names=['item_id', 'title', 'genres'],
-            header=None,
-            encoding='latin-1',
-            engine='python'
-        )
-        return df
-    
-    def load_users(self) -> pd.DataFrame:
-        """Load user information from users.dat file."""
-        extract_dir = self.get_extract_dir()
-        file_path = extract_dir / "users.dat"
-        
-        if not file_path.exists():
-            raise FileNotFoundError(f"Users file not found: {file_path}")
-        
-        df = pd.read_csv(
-            file_path,
-            sep='::',
-            names=['user_id', 'gender', 'age', 'occupation', 'zip_code'],
-            header=None,
-            engine='python'
-        )
-        return df
-    
-    def load_all(self) -> dict[str, pd.DataFrame]:
-        """Load all available data for the 1m dataset."""
-        return {
-            'ratings': self.load_ratings(),
-            'movies': self.load_movies(),
-            'users': self.load_users(),
-        }
+def _parse_timestamps(df: pl.DataFrame, timestamp_cols: Iterable[str]) -> pl.DataFrame:
+    """Cast integer timestamp columns to polars datetime (seconds)."""
+    expressions = []
+    for col in timestamp_cols:
+        if col in df.columns:
+            expressions.append(pl.from_epoch(pl.col(col).cast(pl.Int64, strict=False), time_unit="s").alias(col))
+    return df.with_columns(expressions) if expressions else df
 
 
-class MovieLens10mProcessor(MovieLensProcessor):
-    """Processor for MovieLens 10m dataset."""
-    
-    def get_extract_dir(self) -> Path:
-        return self.data_base_path / "ml-10m"
-    
-    def load_ratings(self) -> pd.DataFrame:
-        """Load ratings from ratings.dat file."""
-        extract_dir = self.get_extract_dir()
-        file_path = extract_dir / "ratings.dat"
-        
-        if not file_path.exists():
-            raise FileNotFoundError(f"Ratings file not found: {file_path}")
-        
-        df = pd.read_csv(
-            file_path,
-            sep='::',
-            names=['user_id', 'item_id', 'rating', 'timestamp'],
-            header=None,
-            engine='python'
-        )
-        df['timestamp'] = pd.to_datetime(df['timestamp'], unit='s', errors='coerce')
-        return df
-    
-    def load_movies(self) -> pd.DataFrame:
-        """Load movie information from movies.dat file."""
-        extract_dir = self.get_extract_dir()
-        file_path = extract_dir / "movies.dat"
-        
-        if not file_path.exists():
-            raise FileNotFoundError(f"Movies file not found: {file_path}")
-        
-        df = pd.read_csv(
-            file_path,
-            sep='::',
-            names=['item_id', 'title', 'genres'],
-            header=None,
-            encoding='latin-1',
-            engine='python'
-        )
-        return df
-    
-    def load_tags(self) -> pd.DataFrame:
-        """Load tags from tags.dat file."""
-        extract_dir = self.get_extract_dir()
-        file_path = extract_dir / "tags.dat"
-        
-        if not file_path.exists():
-            raise FileNotFoundError(f"Tags file not found: {file_path}")
-        
-        df = pd.read_csv(
-            file_path,
-            sep='::',
-            names=['user_id', 'item_id', 'tag', 'timestamp'],
-            header=None,
-            engine='python'
-        )
-        df['timestamp'] = pd.to_datetime(df['timestamp'], unit='s', errors='coerce')
-        return df
-    
-    def load_all(self) -> dict[str, pd.DataFrame]:
-        """Load all available data for the 10m dataset."""
-        return {
-            'ratings': self.load_ratings(),
-            'movies': self.load_movies(),
-            'tags': self.load_tags(),
-        }
+def _read_multichar_separated(
+    file_path: Path, separator: str, columns: list[str], encoding: str | None = None
+) -> pl.DataFrame:
+    """
+    Read a text file that uses a multi-character delimiter (e.g., '::') into a Polars DataFrame.
+    """
+    with open(file_path, "r", encoding=encoding or "utf-8") as f:
+        rows = [line.rstrip("\n").split(separator) for line in f]
+    return pl.DataFrame(rows, schema=columns)
 
 
-class MovieLens20mProcessor(MovieLensProcessor):
-    """Processor for MovieLens 20m dataset."""
-    
-    def get_extract_dir(self) -> Path:
-        return self.data_base_path / "ml-20m"
-    
-    def load_ratings(self) -> pd.DataFrame:
-        """Load ratings from ratings.csv file."""
-        extract_dir = self.get_extract_dir()
-        file_path = extract_dir / "ratings.csv"
-        
+@dataclass
+class TableSpec:
+    """Specification for a single dataset table."""
+
+    filename: str
+    read_kwargs: dict
+    rename_map: Mapping[str, str] = field(default_factory=dict)
+    timestamp_cols: tuple[str, ...] = ()
+    preprocess: Callable[[pl.DataFrame], pl.DataFrame] | None = None
+    loader: Callable[[Path], pl.DataFrame] | None = None
+
+    def _convert_kwargs(self) -> dict:
+        """Translate legacy pandas-style read kwargs to polars-friendly options."""
+        kwargs = dict(self.read_kwargs)
+        if "sep" in kwargs:
+            kwargs["separator"] = kwargs.pop("sep")
+        if "names" in kwargs:
+            kwargs["new_columns"] = kwargs.pop("names")
+        if kwargs.pop("header", None) is None:
+            kwargs["has_header"] = False
+        kwargs.pop("engine", None)
+        return kwargs
+
+    def load(self, base_dir: Path) -> pl.DataFrame:
+        """Load a single table with normalization applied."""
+        file_path = base_dir / self.filename
         if not file_path.exists():
-            raise FileNotFoundError(f"Ratings file not found: {file_path}")
-        
-        df = pd.read_csv(file_path, engine='python')
-        df = df.rename(columns={'userId': 'user_id', 'movieId': 'item_id'})
-        df['timestamp'] = pd.to_datetime(df['timestamp'], unit='s', errors='coerce')
+            raise FileNotFoundError(f"Expected data file not found: {file_path}")
+
+        if self.loader:
+            df = self.loader(file_path)
+        else:
+            kwargs = self._convert_kwargs()
+            df = pl.read_csv(file_path, **kwargs)
+
+        if self.rename_map:
+            df = df.rename(self.rename_map)
+        if self.timestamp_cols:
+            df = _parse_timestamps(df, self.timestamp_cols)
+        if self.preprocess:
+            df = self.preprocess(df)
         return df
-    
-    def load_movies(self) -> pd.DataFrame:
-        """Load movie information from movies.csv file."""
-        extract_dir = self.get_extract_dir()
-        file_path = extract_dir / "movies.csv"
-        
-        if not file_path.exists():
-            raise FileNotFoundError(f"Movies file not found: {file_path}")
-        
-        df = pd.read_csv(file_path, engine='python')
-        df = df.rename(columns={'movieId': 'item_id'})
-        return df
-    
-    def load_tags(self) -> pd.DataFrame:
-        """Load tags from tags.csv file."""
-        extract_dir = self.get_extract_dir()
-        file_path = extract_dir / "tags.csv"
-        
-        if not file_path.exists():
-            raise FileNotFoundError(f"Tags file not found: {file_path}")
-        
-        df = pd.read_csv(file_path, engine='python')
-        df = df.rename(columns={'userId': 'user_id', 'movieId': 'item_id'})
-        df['timestamp'] = pd.to_datetime(df['timestamp'], unit='s', errors='coerce')
-        return df
-    
-    def load_genome_scores(self) -> pd.DataFrame:
-        """Load tag genome scores from genome-scores.csv file."""
-        extract_dir = self.get_extract_dir()
-        file_path = extract_dir / "genome-scores.csv"
-        
-        if not file_path.exists():
-            raise FileNotFoundError(f"Genome scores file not found: {file_path}")
-        
-        df = pd.read_csv(file_path, engine='python')
-        df = df.rename(columns={'movieId': 'item_id'})
-        return df
-    
-    def load_all(self) -> dict[str, pd.DataFrame]:
-        """Load all available data for the 20m dataset."""
-        return {
-            'ratings': self.load_ratings(),
-            'movies': self.load_movies(),
-            'tags': self.load_tags(),
-            'genome_scores': self.load_genome_scores(),
-        }
 
 
-class MovieLens32mProcessor(MovieLensProcessor):
-    """Processor for MovieLens 32m dataset (similar to 20m)."""
-    
-    def get_extract_dir(self) -> Path:
-        return self.data_base_path / "ml-32m"
-    
-    def load_ratings(self) -> pd.DataFrame:
-        """Load ratings from ratings.csv file."""
-        extract_dir = self.get_extract_dir()
-        file_path = extract_dir / "ratings.csv"
-        
-        if not file_path.exists():
-            raise FileNotFoundError(f"Ratings file not found: {file_path}")
-        
-        df = pd.read_csv(file_path, engine='python')
-        df = df.rename(columns={'userId': 'user_id', 'movieId': 'item_id'})
-        df['timestamp'] = pd.to_datetime(df['timestamp'], unit='s', errors='coerce')
-        return df
-    
-    def load_movies(self) -> pd.DataFrame:
-        """Load movie information from movies.csv file."""
-        extract_dir = self.get_extract_dir()
-        file_path = extract_dir / "movies.csv"
-        
-        if not file_path.exists():
-            raise FileNotFoundError(f"Movies file not found: {file_path}")
-        
-        df = pd.read_csv(file_path, engine='python')
-        df = df.rename(columns={'movieId': 'item_id'})
-        return df
-    
-    def load_all(self) -> dict[str, pd.DataFrame]:
-        """Load all available data for the 32m dataset."""
-        return {
-            'ratings': self.load_ratings(),
-            'movies': self.load_movies(),
-        }
+@dataclass
+class MovieLensConfig:
+    """Configuration for a specific MovieLens dataset size."""
+
+    key: str
+    archive_url: str
+    extract_dirname: str
+    tables: dict[str, TableSpec]
+
+    @property
+    def archive_name(self) -> str:
+        return Path(self.archive_url).name
+
+
+def _infer_root_folder(archive_path: Path, base_path: Path) -> Path | None:
+    """Infer the extracted root folder name from a MovieLens zip archive."""
+    with zipfile.ZipFile(archive_path, "r") as zip_ref:
+        for name in zip_ref.namelist():
+            if "/" in name:
+                folder = name.split("/")[0]
+                root_candidate = base_path / folder
+                if root_candidate.exists():
+                    return root_candidate
+    return None
+
+
+def download_and_extract(config: MovieLensConfig, data_base_path: Path) -> Path:
+    """
+    Download and extract a MovieLens archive if it is not already present.
+
+    Args:
+        config: Dataset configuration specifying the archive URL and directory names.
+        data_base_path: Base directory under which the archive is stored/extracted.
+
+    Returns:
+        Path to the dataset extraction directory.
+    """
+    data_base_path.mkdir(parents=True, exist_ok=True)
+    target_dir = data_base_path / config.extract_dirname
+    if target_dir.exists() and any(target_dir.iterdir()):
+        return target_dir
+
+    archive_path = data_base_path / config.archive_name
+    urlretrieve(config.archive_url, archive_path)
+
+    with zipfile.ZipFile(archive_path, "r") as zip_ref:
+        zip_ref.extractall(data_base_path)
+
+    extracted_root = _infer_root_folder(archive_path, data_base_path)
+    if extracted_root and extracted_root != target_dir:
+        extracted_root.rename(target_dir)
+
+    archive_path.unlink(missing_ok=True)
+    return target_dir
 
 
 class MovieLens(DataLoader):
-    """
-    Loader for the MovieLens Dataset.
-    
-    Downloads and loads MovieLens datasets of various sizes.
-    Data is saved to the data folder parallel to the src folder in the root directory.
-    """
-    
-    # Get project root (two levels up from this file: src/recsys/data.py -> root)
+    """Scalable loader for the MovieLens family of datasets."""
+
     _PROJECT_ROOT = Path(__file__).parent.parent.parent
     DATA_BASE_PATH = _PROJECT_ROOT / "data" / "movielens"
-    VALID_SIZES = ["100k", "1m", "10m", "20m", "32m"]
-    
-    # Map dataset sizes to their processors
-    _PROCESSOR_MAP: dict[str, type[MovieLensProcessor]] = {
-        "100k": MovieLens100kProcessor,
-        "1m": MovieLens1mProcessor,
-        "10m": MovieLens10mProcessor,
-        "20m": MovieLens20mProcessor,
-        "32m": MovieLens32mProcessor,
-    }
-    
-    def __init__(self):
-        self.downloader = MovieLensDownloader()
-    
-    def _get_processor(self, size: str) -> MovieLensProcessor:
-        """Get the appropriate processor for the dataset size."""
-        size_lc = size.lower()
-        if size_lc not in self._PROCESSOR_MAP:
-            raise ValueError(f"Unsupported dataset size: {size}")
-        
-        processor_class = self._PROCESSOR_MAP[size_lc]
-        return processor_class(self.DATA_BASE_PATH)
-    
-    def download_and_extract(self, size: str = '100k'):
+
+    def __init__(self, data_base_path: Path | None = None):
+        self.data_base_path = data_base_path or self.DATA_BASE_PATH
+        self.configs = self._build_configs()
+
+    def _build_configs(self) -> dict[str, MovieLensConfig]:
         """
-        Downloads and extracts the MovieLens dataset of the given size if not already present.
-        
+        Create per-size configs derived from the official dataset READMEs.
+
+        Each config enumerates every table documented for a dataset split so the
+        loader can be driven by declarative `TableSpec` objects instead of bespoke
+        parsing code.
+        """
+
+        genre_cols = [
+            "unknown",
+            "Action",
+            "Adventure",
+            "Animation",
+            "Children's",
+            "Comedy",
+            "Crime",
+            "Documentary",
+            "Drama",
+            "Fantasy",
+            "Film-Noir",
+            "Horror",
+            "Musical",
+            "Mystery",
+            "Romance",
+            "Sci-Fi",
+            "Thriller",
+            "War",
+            "Western",
+        ]
+
+        return {
+            "100k": MovieLensConfig(
+                key="100k",
+                archive_url="https://files.grouplens.org/datasets/movielens/ml-100k.zip",
+                extract_dirname="ml-100k",
+                tables={
+                    "ratings": TableSpec(
+                        filename="u.data",
+                        read_kwargs={
+                            "sep": "\t",
+                            "names": ["user_id", "item_id", "rating", "timestamp"],
+                            "header": None,
+                            "engine": "python",
+                        },
+                        timestamp_cols=("timestamp",),
+                    ),
+                    "movies": TableSpec(
+                        filename="u.item",
+                        read_kwargs={
+                            "sep": "|",
+                            "header": None,
+                            "encoding": "latin-1",
+                            "engine": "python",
+                        },
+                        preprocess=lambda df: self._assign_columns(
+                            df,
+                            [
+                                "item_id",
+                                "title",
+                                "release_date",
+                                "video_release_date",
+                                "imdb_url",
+                            ]
+                            + genre_cols,
+                        ),
+                    ),
+                    "users": TableSpec(
+                        filename="u.user",
+                        read_kwargs={
+                            "sep": "|",
+                            "names": ["user_id", "age", "gender", "occupation", "zip_code"],
+                            "header": None,
+                            "engine": "python",
+                        },
+                    ),
+                    # Auxiliary metadata files exposed by the README
+                    "genres": TableSpec(
+                        filename="u.genre",
+                        read_kwargs={"sep": "|", "names": ["genre", "genre_id"], "header": None},
+                    ),
+                    "occupations": TableSpec(
+                        filename="u.occupation",
+                        read_kwargs={"header": None, "names": ["occupation"]},
+                    ),
+                },
+            ),
+            "1m": MovieLensConfig(
+                key="1m",
+                archive_url="https://files.grouplens.org/datasets/movielens/ml-1m.zip",
+                extract_dirname="ml-1m",
+                tables={
+                    "ratings": TableSpec(
+                        filename="ratings.dat",
+                        read_kwargs={"names": ["user_id", "item_id", "rating", "timestamp"], "header": None},
+                        loader=lambda path: _read_multichar_separated(
+                            path, "::", ["user_id", "item_id", "rating", "timestamp"]
+                        ),
+                        timestamp_cols=("timestamp",),
+                    ),
+                    "movies": TableSpec(
+                        filename="movies.dat",
+                        read_kwargs={"names": ["item_id", "title", "genres"], "header": None},
+                        loader=lambda path: _read_multichar_separated(
+                            path, "::", ["item_id", "title", "genres"], encoding="latin-1"
+                        ),
+                    ),
+                    "users": TableSpec(
+                        filename="users.dat",
+                        read_kwargs={"names": ["user_id", "gender", "age", "occupation", "zip_code"], "header": None},
+                        loader=lambda path: _read_multichar_separated(
+                            path, "::", ["user_id", "gender", "age", "occupation", "zip_code"]
+                        ),
+                    ),
+                },
+            ),
+            "10m": MovieLensConfig(
+                key="10m",
+                archive_url="https://files.grouplens.org/datasets/movielens/ml-10m.zip",
+                extract_dirname="ml-10m",
+                tables={
+                    "ratings": TableSpec(
+                        filename="ratings.dat",
+                        read_kwargs={"names": ["user_id", "item_id", "rating", "timestamp"], "header": None},
+                        loader=lambda path: _read_multichar_separated(
+                            path, "::", ["user_id", "item_id", "rating", "timestamp"]
+                        ),
+                        timestamp_cols=("timestamp",),
+                    ),
+                    "movies": TableSpec(
+                        filename="movies.dat",
+                        read_kwargs={"names": ["item_id", "title", "genres"], "header": None},
+                        loader=lambda path: _read_multichar_separated(
+                            path, "::", ["item_id", "title", "genres"], encoding="latin-1"
+                        ),
+                    ),
+                    "tags": TableSpec(
+                        filename="tags.dat",
+                        read_kwargs={"names": ["user_id", "item_id", "tag", "timestamp"], "header": None},
+                        loader=lambda path: _read_multichar_separated(
+                            path, "::", ["user_id", "item_id", "tag", "timestamp"]
+                        ),
+                        timestamp_cols=("timestamp",),
+                    ),
+                },
+            ),
+            "20m": MovieLensConfig(
+                key="20m",
+                archive_url="https://files.grouplens.org/datasets/movielens/ml-20m.zip",
+                extract_dirname="ml-20m",
+                tables={
+                    "ratings": TableSpec(
+                        filename="ratings.csv",
+                        read_kwargs={"engine": "python"},
+                        rename_map={"userId": "user_id", "movieId": "item_id"},
+                        timestamp_cols=("timestamp",),
+                    ),
+                    "movies": TableSpec(
+                        filename="movies.csv",
+                        read_kwargs={"engine": "python"},
+                        rename_map={"movieId": "item_id"},
+                    ),
+                    "tags": TableSpec(
+                        filename="tags.csv",
+                        read_kwargs={"engine": "python"},
+                        rename_map={"userId": "user_id", "movieId": "item_id"},
+                        timestamp_cols=("timestamp",),
+                    ),
+                    "genome_scores": TableSpec(
+                        filename="genome-scores.csv",
+                        read_kwargs={"engine": "python"},
+                        rename_map={"movieId": "item_id"},
+                    ),
+                    "genome_tags": TableSpec(
+                        filename="genome-tags.csv",
+                        read_kwargs={"engine": "python"},
+                    ),
+                    "links": TableSpec(
+                        filename="links.csv",
+                        read_kwargs={"engine": "python"},
+                        rename_map={"movieId": "item_id"},
+                    ),
+                },
+            ),
+            "32m": MovieLensConfig(
+                key="32m",
+                archive_url="https://files.grouplens.org/datasets/movielens/ml-32m.zip",
+                extract_dirname="ml-32m",
+                tables={
+                    "ratings": TableSpec(
+                        filename="ratings.csv",
+                        read_kwargs={"engine": "python"},
+                        rename_map={"userId": "user_id", "movieId": "item_id"},
+                        timestamp_cols=("timestamp",),
+                    ),
+                    "movies": TableSpec(
+                        filename="movies.csv",
+                        read_kwargs={"engine": "python"},
+                        rename_map={"movieId": "item_id"},
+                    ),
+                    "tags": TableSpec(
+                        filename="tags.csv",
+                        read_kwargs={"engine": "python"},
+                        rename_map={"userId": "user_id", "movieId": "item_id"},
+                        timestamp_cols=("timestamp",),
+                    ),
+                    "links": TableSpec(
+                        filename="links.csv",
+                        read_kwargs={"engine": "python"},
+                        rename_map={"movieId": "item_id"},
+                    ),
+                },
+            ),
+        }
+
+    @staticmethod
+    def _assign_columns(df: pl.DataFrame, columns: list[str]) -> pl.DataFrame:
+        df.columns = columns
+        return df
+
+    @property
+    def available_datasets(self) -> list[str]:
+        """Return sorted list of supported MovieLens dataset keys."""
+        return sorted(self.configs)
+
+    def load(
+        self,
+        size: str = "100k",
+        tables: Iterable[str] | None = None,
+        download: bool = True,
+    ) -> dict[str, pl.DataFrame]:
+        """
+        Load one or more MovieLens tables for a specific dataset size.
+
         Args:
-            size: Dataset size ('100k', '1m', '10m', '20m', '32m')
-        """
-        self.downloader.download_and_extract(size)
-    
-    def load_data(self, size: str = '100k') -> dict[str, pd.DataFrame]:
-        """
-        Loads all MovieLens data into a dictionary of DataFrames.
-        Automatically downloads and extracts if necessary.
-        
-        Args:
-            size: Dataset size ('100k', '1m', '10m', '20m', '32m')
-            
+            size: Dataset key ("100k", "1m", "10m", "20m", "32m").
+            tables: Iterable of table names to load. If None, every table from
+                the corresponding README is loaded (e.g., `genres`/`occupations`
+                for 100k, `genome_*` for 20m, etc.).
+            download: Whether to fetch + extract the dataset automatically if
+                it is missing locally.
+
         Returns:
-            Dictionary containing all available data for the dataset:
-            - '100k': {'ratings', 'movies', 'users'}
-            - '1m': {'ratings', 'movies', 'users'}
-            - '10m': {'ratings', 'movies', 'tags'}
-            - '20m': {'ratings', 'movies', 'tags', 'genome_scores'}
-            - '32m': {'ratings', 'movies'}
+            Mapping of table name -> pandas DataFrame.
         """
-        size_lc = size.lower()
-        processor = self._get_processor(size_lc)
-        
-        # Download if necessary
-        extract_dir = processor.get_extract_dir()
-        if not extract_dir.exists() or not any(extract_dir.iterdir()):
-            self.download_and_extract(size_lc)
-        
-        return processor.load_all()
+
+        size_key = size.lower()
+        if size_key not in self.configs:
+            raise ValueError(f"Unsupported dataset size: {size}")
+
+        config = self.configs[size_key]
+        if download:
+            base_dir = download_and_extract(config, self.data_base_path)
+        else:
+            base_dir = self.data_base_path / config.extract_dirname
+            if not base_dir.exists():
+                raise FileNotFoundError(
+                    f"Dataset {size_key} not found at {base_dir}. Set download=True to fetch it."
+                )
+
+        requested_tables = set(tables) if tables else set(config.tables)
+        unknown = requested_tables - set(config.tables)
+        if unknown:
+            raise ValueError(f"Unknown tables for {size_key}: {sorted(unknown)}")
+
+        return {name: config.tables[name].load(base_dir) for name in requested_tables}
+
+    def save(
+        self,
+        size: str = "100k",
+        tables: Iterable[str] | None = None,
+        dest: str | Path | None = None,
+        file_format: str = "parquet",
+        raw: bool = False,
+        download: bool = True,
+    ) -> Path:
+        """
+        Persist MovieLens data to a target directory (local path or a mounted remote
+        location such as Google Drive).
+
+        Args:
+            size: Dataset key to save.
+            tables: Subset of tables to save when `raw` is False. Defaults to all.
+            dest: Destination directory. Useful for saving to alternative storage
+                (e.g., a Google Drive mount path). Defaults to a `<size>_export`
+                folder inside the base data directory.
+            file_format: File format for processed tables ("parquet" or "csv").
+            raw: When True, copy the raw extracted files instead of processed tables.
+            download: Whether to download/extract before saving when missing locally.
+
+        Returns:
+            Path to the directory containing the saved data.
+        """
+
+        size_key = size.lower()
+        config = self.configs.get(size_key)
+        if not config:
+            raise ValueError(f"Unsupported dataset size: {size}")
+
+        if download:
+            base_dir = download_and_extract(config, self.data_base_path)
+        else:
+            base_dir = self.data_base_path / config.extract_dirname
+            if not base_dir.exists():
+                raise FileNotFoundError(
+                    f"Dataset {size_key} not found at {base_dir}. Set download=True to fetch it."
+                )
+
+        dest_path = Path(dest).expanduser() if dest else self.data_base_path / f"{size_key}_export"
+        dest_path.mkdir(parents=True, exist_ok=True)
+
+        if raw:
+            shutil.copytree(base_dir, dest_path, dirs_exist_ok=True)
+            return dest_path
+
+        fmt = file_format.lower()
+        if fmt not in {"parquet", "csv"}:
+            raise ValueError("file_format must be 'parquet' or 'csv'")
+
+        data = self.load(size=size_key, tables=tables, download=False)
+        for name, df in data.items():
+            out_path = dest_path / f"{name}.{fmt}"
+            if fmt == "parquet":
+                df.write_parquet(out_path)
+            else:
+                df.write_csv(out_path)
+
+        return dest_path
+
+    # Convenience utilities for experimentation ---------------------------------
+    @staticmethod
+    def to_implicit(ratings: pl.DataFrame, threshold: float = 0.0) -> pl.DataFrame:
+        """Convert explicit ratings to implicit feedback labels."""
+
+        if "rating" not in ratings.columns:
+            raise ValueError("ratings dataframe must contain a 'rating' column")
+        return ratings.with_columns((pl.col("rating") > threshold).cast(pl.Int8).alias("rating"))
+
+    @staticmethod
+    def filter_cold_start(
+        ratings: pl.DataFrame,
+        min_user_interactions: int = 1,
+        min_item_interactions: int = 1,
+    ) -> pl.DataFrame:
+        """Drop users/items with too few interactions for stable evaluation."""
+
+        user_counts = ratings.group_by("user_id").count().rename({"count": "user_interactions"})
+        item_counts = ratings.group_by("item_id").count().rename({"count": "item_interactions"})
+
+        enriched = (
+            ratings.join(user_counts, on="user_id", how="left")
+            .join(item_counts, on="item_id", how="left")
+        )
+        filtered = enriched.filter(
+            (pl.col("user_interactions") >= min_user_interactions)
+            & (pl.col("item_interactions") >= min_item_interactions)
+        )
+        return filtered.drop(["user_interactions", "item_interactions"])
+
+    @staticmethod
+    def chronological_split(
+        ratings: pl.DataFrame, test_ratio: float = 0.2, timestamp_col: str = "timestamp"
+    ) -> tuple[pl.DataFrame, pl.DataFrame]:
+        """Split ratings by timestamp for temporal evaluation."""
+
+        if timestamp_col not in ratings.columns:
+            raise ValueError(f"ratings dataframe must contain '{timestamp_col}' for chronological split")
+
+        sorted_ratings = ratings.sort(timestamp_col)
+        split_idx = int(sorted_ratings.height * (1 - test_ratio))
+        train = sorted_ratings.slice(0, split_idx)
+        test = sorted_ratings.slice(split_idx)
+        return train, test
