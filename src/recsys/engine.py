@@ -29,13 +29,14 @@ class CTRTask(L.LightningModule):
         optimizer_cls: type[torch.optim.Optimizer],
         optimizer_params: dict[str, Any],
         loss_fn: Callable[[torch.Tensor, torch.Tensor], torch.Tensor],
-        metrics: list[Callable[[torch.Tensor, torch.Tensor], float]] = [],
+        metrics: list[Callable[[torch.Tensor, torch.Tensor], float]] | None = None,
     ):
         super().__init__()
         self.model = model
         self.optimizer_cls = optimizer_cls
-        self.optimizer_kwargs = optimizer_params
+        self.optimizer_params = optimizer_params
         self.loss_fn = loss_fn
+        self.metrics = metrics or []
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         return self.model(x)

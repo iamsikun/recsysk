@@ -479,8 +479,15 @@ class MovieLensDataModule(LightningDataModule):
 
             if spec.type == FeatureType.CATEGORICAL:
                 # Encode categorical feature using polars categorical type
+                # Cast to string first, then to categorical (required for numeric types)
+                # Cast to int64 for PyTorch embedding layer compatibility
                 df = df.with_columns(
-                    pl.col(col_name).cast(pl.Categorical).to_physical().alias(spec.name)
+                    pl.col(col_name)
+                    .cast(pl.Utf8)
+                    .cast(pl.Categorical)
+                    .to_physical()
+                    .cast(pl.Int64)
+                    .alias(spec.name)
                 )
 
                 # record meta data
@@ -495,13 +502,18 @@ class MovieLensDataModule(LightningDataModule):
 
             processed_cols.append(spec.name)
 
-        df = df.select(processed_cols)
-
-        # create tensor
-        data_tensor = torch.from_numpy(df.select(processed_cols).to_numpy())
+        # Extract label before selecting only feature columns
         label_tensor = torch.from_numpy(
             df["label"].to_numpy().astype("float32")
         ).unsqueeze(-1)
+
+        # Select only feature columns for data tensor
+        df = df.select(processed_cols)
+
+        # create tensor
+        # Note: categorical features are already cast to int64 in Polars above
+        # For mixed types, we'd need to handle conversion per column type
+        data_tensor = torch.from_numpy(df.to_numpy())
 
         # create dataset
         self.full_dataset = MovieLensDataset(data_tensor, label_tensor)

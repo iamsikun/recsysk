@@ -13,7 +13,7 @@ def build_feature_specs(feature_configs: List[Dict[str, Any]]) -> List[FeatureSp
         # 1. Convert String to Enum
         # specific logic to map 'categorical' -> FeatureType.CATEGORICAL
         f_type_str = cfg.pop("type").lower()
-        f_type = FeatureType[f_type_str]
+        f_type = FeatureType(f_type_str)  # Look up by value, not by name
 
         # 2. Create Dataclass
         # We unpack the rest of the config (name, source_col)

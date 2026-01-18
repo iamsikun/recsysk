@@ -1,33 +1,35 @@
 data: 
   name: movielens  # this is the name of the dataset in the registry
-  params: 
-    data_base_path: "../datasets"
-    dataset_size: "20m"
-    train_split: 0.8
-    rating_threshold: 4
-    num_workers: 0
-    pin_memory: false
-    batch_size: 1024
-    features: 
-      - name: user_id
-        source_name: user_id
-        type: categorical
-      - name: item_id
-        source_name: item_id
-        type: categorical
+  data_base_path: "./datasets"
+  dataset_size: "20m"
+  train_split: 0.8
+  rating_threshold: 4
+  num_workers: 0
+  pin_memory: false
+  batch_size: 8096
+  features: 
+    - name: user_id
+      source_name: user_id
+      type: CATEGORICAL
+    - name: item_id
+      source_name: item_id
+      type: CATEGORICAL
 
 
 model: 
-  name: deepfm 
+  name: deepfm
+  embed_dim: 16
+  mlp_dims: [128, 64] 
 
 optimizer: 
   name: adamw
-  lr: 1e-3
+  lr: 0.001
 
 loss: 
   name: binary_cross_entropy_with_logits
 
 trainer: 
-  max_epochs: 5
+  max_epochs: 2
   accelerator: gpu
   devices: 1
+  log_every_n_steps: 1

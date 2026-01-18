@@ -1,5 +1,4 @@
 import yaml
-import pprint
 import lightning as L
 from recsys.utils import (
     MODEL_REGISTRY,
@@ -8,6 +7,8 @@ from recsys.utils import (
     DATASET_REGISTRY,
 )
 from recsys.engine import CTRTask
+import recsys.data
+import recsys.models 
 
 
 def get_config() -> dict:
@@ -32,14 +33,19 @@ def main():
 
     # 3. get optimizer and loss classes
     # NOTE: do not build (instantiate) optimizer because we don't know the model parameters yet
-    opt_cfg = cfg["optimizer"]
+    opt_cfg = cfg["optimizer"].copy()
     opt_name = opt_cfg.pop("name")
     opt_cls = OPTIMIZER_REGISTRY.get(opt_name)
 
     loss_fn = LOSS_REGISTRY.get(cfg["loss"]["name"])
 
     # 4. instantiate task and trainer
-    task = CTRTask(model=model, optimizer_cls=opt_cls, loss_fn=loss_fn)
+    task = CTRTask(
+        model=model,
+        optimizer_cls=opt_cls,
+        optimizer_params=opt_cfg,
+        loss_fn=loss_fn,
+    )
     print(
         f"Task built successfully. Model: {model}, Optimizer: {opt_cls}, Loss: {loss_fn}"
     )
