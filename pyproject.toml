@@ -10,15 +10,27 @@ description = "Add your description here"
 readme = "README.md"
 requires-python = ">=3.13"
 dependencies = [
-    "numpy>=2.4.0",
+    "lightning>=2.6.0",
+    "numpy>=2.3.4",
     "pandas>=2.3.3",
+    "pip>=25.3",
+    "polars>=1.37.1",
     "scikit-learn>=1.8.0",
-    "torch>=2.9.1",
+    "torch",
 ]
 
-[project.urls]
-Homepage = "https://github.com/iamsikun/latentflow"
-Repository = "https://github.com/iamsikun/latentflow"
+# define the CUDA-specific index
+[[tool.uv.index]]
+name = "pytorch-cu130"
+url = "https://download.pytorch.org/whl/cu130"
+explicit = true  # Crucial: prevents uv from searching this index for other packages
+
+# tell uv to use that index only on windows
+[tool.uv.sources]
+torch = [
+    {index = "pytorch-cu130", marker = "sys_platform == 'win32'"}
+]
+
 
 [tool.setuptools]
 package-dir = {"" = "src"}
