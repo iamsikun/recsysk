@@ -1,2 +1,2 @@
-# Import modules to register datasets
-from recsys.data import movielens
+# Import datamodules to register datasets
+from recsys.data.datamodules import movielens  # noqa: F401
