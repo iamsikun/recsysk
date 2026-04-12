@@ -1,0 +1,77 @@
+"""MovieLens sequential benchmark for DIN-style history-aware models."""
+
+from __future__ import annotations
+
+import logging
+from typing import Any
+
+from recsys.benchmarks.base import Benchmark, BenchmarkData
+from recsys.tasks.ctr import CTRTask
+from recsys.utils import BENCHMARK_REGISTRY, DATASET_REGISTRY
+
+LOGGER = logging.getLogger(__name__)
+
+
+@BENCHMARK_REGISTRY.register("movielens_seq")
+class MovieLensSeqBenchmark(Benchmark):
+    """MovieLens sequential (history-aware) CTR benchmark.
+
+    Same pinned metric list as :class:`MovieLensCTRBenchmark`, but the
+    datamodule is built with ``model_input: sequence`` so that dict-valued
+    batches (``{item_id, hist_item_id, ...}``) flow to sequence-aware
+    algorithms like DIN. Wave 3 limitation: the ranking slice of the
+    metric dict is NaN for dict-batch algos — see
+    :class:`recsys.evaluation.evaluator.CTREvaluator.evaluate_full`.
+    """
+
+    name = "movielens_seq"
+    task = CTRTask()
+    metric_names = [
+        "auc",
+        "logloss",
+        "ndcg@10",
+        "ndcg@50",
+        "recall@10",
+        "recall@50",
+        "hr@10",
+        "hr@50",
+        "mrr",
+    ]
+
+    def __init__(self, data_cfg: dict[str, Any], eval_cfg: dict[str, Any] | None = None):
+        self._data_cfg = dict(data_cfg)
+        self._eval_cfg = dict(eval_cfg or {})
+
+    def build(self) -> BenchmarkData:
+        data_cfg = dict(self._data_cfg)
+        data_cfg.setdefault("name", "movielens")
+        data_cfg["model_input"] = "sequence"
+        # Defaults for sequential DIN-style input. Callers can override via
+        # the benchmark config.
+        data_cfg.setdefault("item_feature", "item_id")
+        data_cfg.setdefault("history_feature", "hist_item_id")
+        data_cfg.setdefault("sparse_feature_names", ["user_id"])
+        data_cfg.setdefault("max_history_len", 20)
+
+        LOGGER.info(
+            "MovieLensSeqBenchmark.build: instantiating sequence datamodule"
+        )
+        dm = DATASET_REGISTRY.build(data_cfg)
+        dm.setup(stage="fit")
+
+        feature_specs: list = []
+        builder = getattr(dm, "builder", None)
+        builder_config = getattr(builder, "config", None) if builder is not None else None
+        if builder_config is not None:
+            feature_specs = list(getattr(builder_config, "features", []) or [])
+
+        return BenchmarkData(
+            train=dm.train_dataset,
+            val=dm.val_dataset,
+            # TODO (Wave 4): proper held-out test split.
+            test=dm.val_dataset,
+            feature_map=dict(dm.feature_map),
+            feature_specs=feature_specs,
+            datamodule=dm,
+            metadata={"eval": dict(self._eval_cfg)},
+        )

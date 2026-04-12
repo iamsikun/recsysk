@@ -1,9 +1,9 @@
-"""Minimal CTR evaluator used during Phase 2 of the migration.
+"""CTR evaluator.
 
 Iterates a validation/test dataloader, runs the model's forward pass to
 obtain logits, applies sigmoid, and reports AUC + LogLoss on the collected
-predictions. Intentionally small — this will be folded into the
-``evaluation.Evaluator`` protocol in later phases.
+predictions. Phase 5 adds :meth:`CTREvaluator.evaluate_full` which extends
+the CTR set with sampled-100 negative ranking metrics.
 """
 
 from __future__ import annotations
@@ -16,6 +16,7 @@ import torch
 
 from recsys.metrics.ctr import auc as _auc
 from recsys.metrics.ctr import logloss as _logloss
+from recsys.metrics.ranking import hr_at_k, mrr, ndcg_at_k, recall_at_k
 
 LOGGER = logging.getLogger(__name__)
 
@@ -24,14 +25,21 @@ _METRIC_FNS = {
     "logloss": _logloss,
 }
 
+# Max users evaluated for ranking metrics in smoke mode.
+_SMOKE_MAX_USERS = 200
+
+# Emit the dict-batch ranking warning only once per process.
+_DICT_BATCH_WARNED = False
+
 
 class CTREvaluator:
-    """Compute CTR metrics on a dataloader.
+    """Compute CTR + ranking metrics on a dataloader/datamodule.
 
     Parameters
     ----------
     metrics:
-        Optional list of metric names. Defaults to ``["auc", "logloss"]``.
+        Optional list of metric names for the legacy :meth:`evaluate`
+        entrypoint. Defaults to ``["auc", "logloss"]``.
     """
 
     def __init__(self, metrics: list[str] | None = None) -> None:
@@ -91,6 +99,208 @@ class CTREvaluator:
                 LOGGER.warning("Failed to compute metric %s: %s", name, exc)
                 results[name] = float("nan")
         return results
+
+    def evaluate_full(
+        self,
+        model: torch.nn.Module,
+        datamodule,
+        n_negatives: int = 100,
+        seed: int = 42,
+        device: torch.device | str | None = None,
+        max_users: int | None = None,
+    ) -> dict[str, float]:
+        """Compute the full CTR + ranking metric set.
+
+        Returns a dict with keys: ``auc``, ``logloss``, ``ndcg@10``,
+        ``ndcg@50``, ``recall@10``, ``recall@50``, ``hr@10``, ``hr@50``,
+        ``mrr``.
+
+        Ranking metrics use the sampled-100 negatives protocol: for each
+        evaluated positive interaction, sample ``n_negatives`` items the
+        user hasn't seen in the val set and rank them against the held-out
+        positive. The evaluation is capped at ``max_users`` users (default
+        ``None`` == all) to keep the smoke gate cheap.
+
+        For dict-batch algorithms (e.g. DIN sequential) the ranking step
+        cannot easily synthesise a fake batch without access to the
+        history column, so those metrics are returned as NaN and a warning
+        is emitted once per process.
+        """
+        if device is None:
+            device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        else:
+            device = torch.device(device) if not isinstance(device, torch.device) else device
+
+        # ---- CTR metrics (AUC, LogLoss) via legacy path. ----
+        val_loader = datamodule.val_dataloader()
+        model.to(device)
+        ctr_metrics = self.evaluate(model, val_loader, device)
+
+        ranking_keys = [
+            "ndcg@10",
+            "ndcg@50",
+            "recall@10",
+            "recall@50",
+            "hr@10",
+            "hr@50",
+            "mrr",
+        ]
+
+        # Pre-seed result with NaNs so we always return all keys.
+        result: dict[str, float] = {
+            "auc": float(ctr_metrics.get("auc", float("nan"))),
+            "logloss": float(ctr_metrics.get("logloss", float("nan"))),
+        }
+        for k in ranking_keys:
+            result[k] = float("nan")
+
+        val_dataset = getattr(datamodule, "val_dataset", None)
+        feature_map: dict[str, int] = getattr(datamodule, "feature_map", {}) or {}
+        if val_dataset is None or not feature_map:
+            LOGGER.warning(
+                "evaluate_full: no val_dataset/feature_map; skipping ranking metrics"
+            )
+            return result
+
+        # Column indices: rely on dict insertion order used everywhere in
+        # the codebase (see Popularity.__init__ for the same assumption).
+        feature_names = list(feature_map.keys())
+        if "user_id" not in feature_names or "item_id" not in feature_names:
+            LOGGER.warning(
+                "evaluate_full: feature_map missing user_id or item_id; "
+                "skipping ranking metrics. keys=%s",
+                feature_names,
+            )
+            return result
+        user_col = feature_names.index("user_id")
+        item_col = feature_names.index("item_id")
+        n_items = int(feature_map["item_id"])
+
+        # ---- Probe one row to detect dict-batch limitation. ----
+        try:
+            first = val_dataset[0]
+        except Exception as exc:  # noqa: BLE001
+            LOGGER.warning("evaluate_full: val_dataset indexing failed: %s", exc)
+            return result
+
+        if not isinstance(first, (tuple, list)) or len(first) < 2:
+            LOGGER.warning(
+                "evaluate_full: val_dataset rows must be (x, y); got %s",
+                type(first).__name__,
+            )
+            return result
+
+        sample_x = first[0]
+        if not isinstance(sample_x, torch.Tensor):
+            # Dict-batch path (DIN sequential) — synthesising a fake batch
+            # for sampled-100 ranking would require fabricating history
+            # columns. Wave 3 leaves this NaN and documents the limitation.
+            global _DICT_BATCH_WARNED
+            if not _DICT_BATCH_WARNED:
+                LOGGER.warning(
+                    "evaluate_full: dict-batch inputs (e.g. DIN sequential) "
+                    "not supported for ranking metrics; returning NaN. "
+                    "This limitation is tracked as a follow-up."
+                )
+                _DICT_BATCH_WARNED = True
+            return result
+
+        # ---- Build user -> positive items, user -> all interacted items. ----
+        user_positives: dict[int, list[tuple[int, torch.Tensor]]] = {}
+        user_interacted: dict[int, set[int]] = {}
+
+        for idx in range(len(val_dataset)):
+            row = val_dataset[idx]
+            if not isinstance(row, (tuple, list)) or len(row) < 2:
+                continue
+            x, y = row[0], row[1]
+            if not isinstance(x, torch.Tensor):
+                continue
+            try:
+                u = int(x[user_col].item())
+                it = int(x[item_col].item())
+            except Exception:  # noqa: BLE001
+                continue
+            label = float(y.item() if isinstance(y, torch.Tensor) else float(y))
+            interacted = user_interacted.setdefault(u, set())
+            interacted.add(it)
+            if label > 0.0:
+                positives = user_positives.setdefault(u, [])
+                positives.append((it, x.detach().clone()))
+
+        eligible_users = [u for u, plist in user_positives.items() if plist]
+        if not eligible_users:
+            LOGGER.warning("evaluate_full: no positive rows found in val_dataset")
+            return result
+
+        # Deterministic ordering, then cap.
+        eligible_users.sort()
+        if max_users is not None and len(eligible_users) > int(max_users):
+            eligible_users = eligible_users[: int(max_users)]
+
+        rng = np.random.default_rng(seed)
+
+        per_user_gt: list[list[int]] = []
+        per_user_preds: list[list[int]] = []
+
+        was_training = model.training
+        model.eval()
+        try:
+            with torch.no_grad():
+                for u in eligible_users:
+                    pos_it, pos_row = user_positives[u][0]
+                    interacted = user_interacted.get(u, set())
+                    # Sample candidate negatives.
+                    negatives: list[int] = []
+                    attempts = 0
+                    while len(negatives) < n_negatives and attempts < n_negatives * 20:
+                        cand = int(rng.integers(0, n_items))
+                        attempts += 1
+                        if cand in interacted or cand == pos_it or cand in negatives:
+                            continue
+                        negatives.append(cand)
+                    if not negatives:
+                        continue
+                    item_ids = [pos_it, *negatives]
+                    batch = pos_row.unsqueeze(0).repeat(len(item_ids), 1).to(device)
+                    batch[:, item_col] = torch.tensor(
+                        item_ids, dtype=batch.dtype, device=device
+                    )
+                    try:
+                        logits = model(batch)
+                    except Exception as exc:  # noqa: BLE001
+                        LOGGER.warning(
+                            "evaluate_full: model forward failed for user %s: %s",
+                            u,
+                            exc,
+                        )
+                        continue
+                    scores = logits.detach().float().cpu().numpy().reshape(-1)
+                    # Argsort descending.
+                    order = np.argsort(-scores)
+                    ranked = [int(item_ids[i]) for i in order]
+                    per_user_gt.append([int(pos_it)])
+                    per_user_preds.append(ranked)
+        finally:
+            if was_training:
+                model.train()
+
+        if not per_user_gt:
+            LOGGER.warning("evaluate_full: ranking loop produced no users")
+            return result
+
+        try:
+            result["ndcg@10"] = float(ndcg_at_k(per_user_gt, per_user_preds, 10))
+            result["ndcg@50"] = float(ndcg_at_k(per_user_gt, per_user_preds, 50))
+            result["recall@10"] = float(recall_at_k(per_user_gt, per_user_preds, 10))
+            result["recall@50"] = float(recall_at_k(per_user_gt, per_user_preds, 50))
+            result["hr@10"] = float(hr_at_k(per_user_gt, per_user_preds, 10))
+            result["hr@50"] = float(hr_at_k(per_user_gt, per_user_preds, 50))
+            result["mrr"] = float(mrr(per_user_gt, per_user_preds))
+        except Exception as exc:  # noqa: BLE001
+            LOGGER.warning("evaluate_full: ranking metric computation failed: %s", exc)
+
+        return result
 
 
 def _to_device(x, device: torch.device):
