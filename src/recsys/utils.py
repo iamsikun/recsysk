@@ -60,6 +60,6 @@ class Registry:
 
 
 DATASET_REGISTRY = Registry("Datasets")
-MODEL_REGISTRY = Registry("Models")
+ALGO_REGISTRY = Registry("Algorithms")
 OPTIMIZER_REGISTRY = Registry("Optimizers")
 LOSS_REGISTRY = Registry("Losses")

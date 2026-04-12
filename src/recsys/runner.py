@@ -12,13 +12,13 @@ import yaml
 from recsys.engine import CTRTask
 from recsys.evaluation import CTREvaluator
 from recsys.utils import (
-    MODEL_REGISTRY,
+    ALGO_REGISTRY,
     OPTIMIZER_REGISTRY,
     LOSS_REGISTRY,
     DATASET_REGISTRY,
 )
 import recsys.data  # Needed to register datasets
-import recsys.models  # Needed to register models
+import recsys.algorithms  # Needed to register algorithms
 
 
 LOGGER = logging.getLogger(__name__)
@@ -82,7 +82,7 @@ def build_datamodule(cfg: dict[str, Any]):
 def build_model(cfg: dict[str, Any], feature_map: dict[str, int]):
     model_cfg = cfg["model"]
     LOGGER.info("Building model: %s", model_cfg.get("name"))
-    return MODEL_REGISTRY.build(model_cfg, feature_map=feature_map)
+    return ALGO_REGISTRY.build(model_cfg, feature_map=feature_map)
 
 
 def build_optimizer(cfg: dict[str, Any]):
@@ -130,6 +130,12 @@ def train(cfg: dict[str, Any]) -> None:
 
     dm = build_datamodule(cfg)
     model = build_model(cfg, dm.feature_map)
+    # Classical-algorithm hook: one-shot fit on the train dataset before
+    # Lightning runs. Used by baselines like popularity that don't need SGD.
+    fit_hook = getattr(model, "fit_on_train_counts", None)
+    if callable(fit_hook):
+        LOGGER.info("Running classical one-shot fit_on_train_counts")
+        fit_hook(dm.train_dataset)
     optimizer_cls, optimizer_params = build_optimizer(cfg)
     loss_fn = build_loss(cfg)
     task = build_task(model, optimizer_cls, optimizer_params, loss_fn)

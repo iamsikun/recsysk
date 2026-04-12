@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import torch
 from torch import nn
-from recsys.utils import MODEL_REGISTRY
+from recsys.utils import ALGO_REGISTRY
 from recsys.models.utils import build_mlp
 
 
@@ -84,7 +84,7 @@ class LocalActivationUnit(nn.Module):
         return output
 
 
-@MODEL_REGISTRY.register("din")
+@ALGO_REGISTRY.register("din")
 class DeepInterestNetwork(nn.Module):
     """
     Deep Interest Network (DIN) for CTR prediction.

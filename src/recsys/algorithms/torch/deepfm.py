@@ -2,10 +2,10 @@ from __future__ import annotations
 
 import torch
 from torch import nn
-from recsys.utils import MODEL_REGISTRY
+from recsys.utils import ALGO_REGISTRY
 
 
-@MODEL_REGISTRY.register("deepfm")
+@ALGO_REGISTRY.register("deepfm")
 class DeepFM(nn.Module):
     """
     DeepFM: A Factorization-Machine based Neural Network for CTR Prediction.

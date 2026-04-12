@@ -1,6 +1,6 @@
 """Compatibility shim — the real implementations now live under
 :mod:`recsys.algorithms.torch`. Importing :mod:`recsys.models` triggers
-importing :mod:`recsys.algorithms` so that all ``@MODEL_REGISTRY.register``
+importing :mod:`recsys.algorithms` so that all ``@ALGO_REGISTRY.register``
 decorators run. Deleted in Phase 7.
 """
 
