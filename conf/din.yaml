@@ -18,9 +18,11 @@ data:
     - name: user_id
       source_name: user_id
       type: CATEGORICAL
+      role: user
     - name: item_id
       source_name: item_id
       type: CATEGORICAL
+      role: item
 
 model:
   name: din

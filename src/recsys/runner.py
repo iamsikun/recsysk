@@ -6,9 +6,11 @@ import os
 from typing import Any
 
 import lightning as L
+import torch
 import yaml
 
 from recsys.engine import CTRTask
+from recsys.evaluation import CTREvaluator
 from recsys.utils import (
     MODEL_REGISTRY,
     OPTIMIZER_REGISTRY,
@@ -135,6 +137,30 @@ def train(cfg: dict[str, Any]) -> None:
 
     LOGGER.info("Starting training")
     trainer.fit(task, datamodule=dm)
+
+    # Phase 2: post-fit CTR evaluation on the val dataloader.
+    val_loader = dm.val_dataloader()
+    if val_loader is None:
+        LOGGER.warning("No val dataloader available; skipping post-fit evaluation")
+        return
+    device = getattr(trainer.strategy, "root_device", None)
+    if device is None:
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    task.eval()
+    task.model.to(device)
+    try:
+        metrics = CTREvaluator().evaluate(task.model, val_loader, device)
+    except Exception as exc:  # noqa: BLE001
+        LOGGER.warning("Post-fit evaluation failed: %s", exc)
+        return
+    if not metrics:
+        LOGGER.warning("Post-fit val metrics: empty (no batches evaluated)")
+        return
+    LOGGER.info(
+        "Post-fit val metrics: auc=%.6f logloss=%.6f",
+        metrics.get("auc", float("nan")),
+        metrics.get("logloss", float("nan")),
+    )
 
 
 def train_from_config(
