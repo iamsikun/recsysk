@@ -1,8 +1,11 @@
 from __future__ import annotations
 
-from pathlib import Path
 import logging
 import os
+import subprocess
+import time
+from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any
 
 import lightning as L
@@ -11,12 +14,14 @@ import yaml
 
 from recsys.engine import CTRTask as LightningCTRTask
 from recsys.evaluation import CTREvaluator
+from recsys.evaluation.store import ResultStore, RunResult
 from recsys.utils import (
     ALGO_REGISTRY,
     BENCHMARK_REGISTRY,
-    OPTIMIZER_REGISTRY,
-    LOSS_REGISTRY,
     DATASET_REGISTRY,
+    LOSS_REGISTRY,
+    OPTIMIZER_REGISTRY,
+    config_hash,
 )
 import recsys.data  # Needed to register datasets
 import recsys.algorithms  # Needed to register algorithms
@@ -139,21 +144,43 @@ _DEFAULT_OPTIMIZER = {"name": "adamw", "lr": 0.001}
 _DEFAULT_LOSS = {"name": "binary_cross_entropy_with_logits"}
 
 
+def _git_sha() -> str | None:
+    """Best-effort ``git rev-parse HEAD``; return ``None`` on failure."""
+    try:
+        out = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            capture_output=True,
+            check=True,
+            text=True,
+            timeout=3,
+        )
+        return out.stdout.strip() or None
+    except (subprocess.SubprocessError, FileNotFoundError, OSError):
+        return None
+
+
 def run_experiment(
     algo_cfg: dict[str, Any],
     benchmark_cfg: dict[str, Any],
     seed: int = 42,
     trainer_overrides: dict[str, Any] | None = None,
+    results_dir: Path | str | None = None,
+    store: ResultStore | None = None,
 ) -> dict[str, float]:
     """Run an algorithm against a benchmark and return the metric dict.
 
-    This is the new single entrypoint the CLI and higher-level tooling
-    (Wave 5) will hit. ``algo_cfg`` is what used to live under ``cfg["model"]``
-    plus optional ``optimizer``/``loss`` overrides. ``benchmark_cfg`` is
-    what :func:`load_config` returns for a ``conf/benchmarks/*.yaml`` file.
+    This is the single entrypoint the CLI and higher-level tooling hits.
+    ``algo_cfg`` is what used to live under ``cfg["model"]`` plus optional
+    ``optimizer``/``loss`` overrides. ``benchmark_cfg`` is what
+    :func:`load_config` returns for a ``conf/benchmarks/*.yaml`` file.
+
+    If ``store`` is provided (or ``results_dir`` is set, in which case a
+    fresh :class:`ResultStore` is built), a :class:`RunResult` row is
+    appended after evaluation completes.
     """
     L.seed_everything(seed, workers=True)
     LOGGER.info("run_experiment: seed=%s", seed)
+    start_time = time.perf_counter()
 
     # Normalise data cfg (num_workers=auto, inject seed, ...).
     data_cfg = _normalize_data_cfg(benchmark_cfg.get("data", {}), seed)
@@ -229,69 +256,34 @@ def run_experiment(
         max_users_override=max_users_override,
     )
 
+    runtime_s = time.perf_counter() - start_time
     LOGGER.info(
         "run_experiment: metrics: "
         + " ".join(f"{k}={v:.6f}" for k, v in metrics.items())
     )
+
+    # Persist the run if a store (or a results_dir) was provided.
+    effective_store = store
+    if effective_store is None and results_dir is not None:
+        effective_store = ResultStore(results_dir)
+    if effective_store is not None:
+        algo_name = str(algo_cfg.get("name", "unknown"))
+        result = RunResult(
+            benchmark=benchmark.name,
+            benchmark_version=benchmark.version(),
+            algo=algo_name,
+            algo_config_hash=config_hash(algo_cfg),
+            seed=int(seed),
+            metrics={k: float(v) for k, v in metrics.items()},
+            runtime_s=float(runtime_s),
+            timestamp=datetime.now(timezone.utc).isoformat(),
+            code_sha=_git_sha(),
+            env_fingerprint=None,
+        )
+        effective_store.write(result)
+        LOGGER.info(
+            "run_experiment: wrote result to %s",
+            effective_store._path(benchmark.name),
+        )
+
     return metrics
-
-
-def train(cfg: dict[str, Any]) -> dict[str, float] | None:
-    """Compatibility shim: accept a flat legacy config and dispatch.
-
-    Splits ``cfg`` into ``(algo_cfg, benchmark_cfg)`` and delegates to
-    :func:`run_experiment`. This shim lets ``conf/deepfm.yaml``,
-    ``conf/din.yaml``, and ``conf/algorithms/popularity.yaml`` keep
-    working while callers migrate to the new entrypoint. Wave 5 will
-    delete it.
-    """
-    seed = cfg.get("seed", 42)
-    algo_cfg: dict[str, Any] = dict(cfg["model"])
-    # Legacy configs carry optimizer/loss at the top level; attach them
-    # to the algo cfg so run_experiment's Lightning wrapper sees them.
-    if "optimizer" in cfg:
-        algo_cfg["optimizer"] = dict(cfg["optimizer"])
-    if "loss" in cfg:
-        algo_cfg["loss"] = dict(cfg["loss"])
-
-    data_cfg = dict(cfg.get("data", {}))
-    model_input = str(data_cfg.get("model_input", "tabular")).lower()
-    bench_name = "movielens_seq" if model_input == "sequence" else "movielens_ctr"
-
-    benchmark_cfg = {
-        "name": bench_name,
-        "data": data_cfg,
-        "eval": {"n_negatives": 100, "seed": seed},
-    }
-
-    trainer_overrides = dict(cfg.get("trainer", {}))
-
-    metrics = run_experiment(
-        algo_cfg=algo_cfg,
-        benchmark_cfg=benchmark_cfg,
-        seed=seed,
-        trainer_overrides=trainer_overrides,
-    )
-    LOGGER.info(
-        "Post-fit val metrics: auc=%.6f logloss=%.6f",
-        metrics.get("auc", float("nan")),
-        metrics.get("logloss", float("nan")),
-    )
-    return metrics
-
-
-def train_from_config(
-    config_path: str | Path,
-    log_level: str | int = "INFO",
-    seed_override: int | None = None,
-) -> None:
-    configure_logging(log_level)
-
-    LOGGER.info(f"Starting training from config: {config_path}")
-    cfg = load_config(config_path)
-    LOGGER.info(f"Using device: {cfg['trainer']['accelerator']}")
-
-    if seed_override is not None:
-        LOGGER.info(f"Overriding seed with: {seed_override}")
-        cfg["seed"] = seed_override
-    train(cfg)

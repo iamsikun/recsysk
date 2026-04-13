@@ -33,6 +33,9 @@ torch = [
 ]
 
 
+[project.scripts]
+recsys = "recsys.cli:main"
+
 [tool.setuptools]
 package-dir = {"" = "src"}
 

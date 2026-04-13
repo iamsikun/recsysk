@@ -2,8 +2,8 @@ from __future__ import annotations
 
 import torch
 from torch import nn
+from recsys.algorithms.torch._mlp import build_mlp
 from recsys.utils import ALGO_REGISTRY
-from recsys.models.utils import build_mlp
 
 
 class LocalActivationUnit(nn.Module):

@@ -1,0 +1,11 @@
+name: popularity_on_movielens_ctr
+benchmark: conf/benchmarks/movielens_ctr.yaml
+algo: conf/algorithms/popularity.yaml
+seeds: [1, 2, 3]
+trainer:
+  accelerator: auto
+  devices: 1
+  max_epochs: 0
+  limit_val_batches: 4
+  enable_progress_bar: false
+  enable_checkpointing: false

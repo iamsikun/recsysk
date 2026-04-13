@@ -1,5 +1,20 @@
 from __future__ import annotations
 
+import hashlib
+import json
+from typing import Any
+
+
+def config_hash(cfg: dict[str, Any]) -> str:
+    """Return a short deterministic hash of a config dict.
+
+    Used to key result store rows by algo configuration. The hash is
+    stable across runs for the same ``cfg`` values because keys are
+    sorted and non-JSON values fall back to ``str``.
+    """
+    blob = json.dumps(cfg, sort_keys=True, default=str).encode("utf-8")
+    return hashlib.sha256(blob).hexdigest()[:12]
+
 
 class Registry:
     def __init__(self, name: str):
