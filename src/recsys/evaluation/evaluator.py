@@ -14,6 +14,7 @@ from typing import Iterable
 import numpy as np
 import torch
 
+from recsys.data.negatives.random_uniform import RandomUniform
 from recsys.metrics.ctr import auc as _auc
 from recsys.metrics.ctr import logloss as _logloss
 from recsys.metrics.ranking import hr_at_k, mrr, ndcg_at_k, recall_at_k
@@ -108,6 +109,7 @@ class CTREvaluator:
         seed: int = 42,
         device: torch.device | str | None = None,
         max_users: int | None = None,
+        negative_sampler=None,
     ) -> dict[str, float]:
         """Compute the full CTR + ranking metric set.
 
@@ -240,6 +242,15 @@ class CTREvaluator:
 
         rng = np.random.default_rng(seed)
 
+        # Wave 4 (P6): negative sampling extracted into
+        # ``recsys.data.negatives.random_uniform.RandomUniform``. The
+        # evaluator now receives the sampler via ``negative_sampler``
+        # (forwarded by :class:`recsys.tasks.ctr.CTRTask.evaluate` from
+        # ``benchmark_data.metadata["negative_sampler"]``). When no
+        # sampler is supplied we fall back to a fresh ``RandomUniform``
+        # instance so the legacy compat path keeps working byte-for-byte.
+        sampler = negative_sampler if negative_sampler is not None else RandomUniform()
+
         per_user_gt: list[list[int]] = []
         per_user_preds: list[list[int]] = []
 
@@ -250,15 +261,19 @@ class CTREvaluator:
                 for u in eligible_users:
                     pos_it, pos_row = user_positives[u][0]
                     interacted = user_interacted.get(u, set())
-                    # Sample candidate negatives.
-                    negatives: list[int] = []
-                    attempts = 0
-                    while len(negatives) < n_negatives and attempts < n_negatives * 20:
-                        cand = int(rng.integers(0, n_items))
-                        attempts += 1
-                        if cand in interacted or cand == pos_it or cand in negatives:
-                            continue
-                        negatives.append(cand)
+                    # Sampled-K negatives via the extracted
+                    # RandomUniform sampler. ``exclude`` is the union of
+                    # the user's interacted items and the held-out
+                    # positive, matching the pre-Wave-4 inline loop's
+                    # reject condition (cand in interacted or cand == pos_it).
+                    exclude = interacted | {pos_it}
+                    negatives_arr = sampler.sample(
+                        n_negatives=n_negatives,
+                        exclude=exclude,
+                        vocab_size=n_items,
+                        rng=rng,
+                    )
+                    negatives = [int(x) for x in negatives_arr.tolist()]
                     if not negatives:
                         continue
                     item_ids = [pos_it, *negatives]

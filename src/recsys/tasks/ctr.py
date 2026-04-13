@@ -42,6 +42,13 @@ class CTRTask(Task):
         if max_users_override is not None:
             max_users = max_users_override
 
+        # Wave 4 (P6): forward the benchmark's declared negative sampler
+        # into the evaluator so sampled-100 ranking negatives come from
+        # the extracted ``recsys.data.negatives`` module rather than an
+        # inline loop. Absent metadata.negative_sampler, the evaluator
+        # falls back to a fresh ``RandomUniform`` (legacy compat).
+        negative_sampler = benchmark_data.metadata.get("negative_sampler")
+
         evaluator = CTREvaluator()
         full = evaluator.evaluate_full(
             model,
@@ -49,6 +56,7 @@ class CTRTask(Task):
             n_negatives=n_negatives,
             seed=seed,
             max_users=max_users,
+            negative_sampler=negative_sampler,
         )
         filtered = {name: full[name] for name in metric_names if name in full}
         missing = [name for name in metric_names if name not in full]
