@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import logging
+from pathlib import Path
 from typing import Any
 
 from recsys.algorithms.base import TaskType
 from recsys.evaluation import CTREvaluator
+from recsys.evaluation.evaluator import iter_predictions
 from recsys.tasks.base import Task
 from recsys.utils import TASK_REGISTRY
 
@@ -67,3 +69,26 @@ class CTRTask(Task):
                 missing,
             )
         return filtered
+
+    def export_predictions(
+        self,
+        algo: Any,
+        benchmark: Any,
+        benchmark_data: Any,
+        out_path: Path,
+    ) -> None:
+        """Score every row in ``benchmark_data.test`` and hand the
+        results to ``benchmark.write_submission``.
+
+        The benchmark owns the output shape — CSV row/column layout,
+        header name, any id translation from dataset row-index to
+        competition row-id. This keeps the harness dataset-agnostic.
+        """
+        model = getattr(algo, "model", algo)
+        test_dataset = benchmark_data.test
+        if test_dataset is None:
+            raise ValueError(
+                "CTRTask.export_predictions: benchmark_data.test is None"
+            )
+        predictions = iter_predictions(model, test_dataset)
+        benchmark.write_submission(predictions, Path(out_path))

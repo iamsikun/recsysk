@@ -11,6 +11,7 @@ algorithm — it does *not* subclass ``nn.Module`` and does not import
 from __future__ import annotations
 
 import logging
+from pathlib import Path
 
 from recsys.algorithms.base import Algorithm, TaskType
 from recsys.utils import ALGO_REGISTRY
@@ -39,7 +40,13 @@ class Popularity(Algorithm):
         self,
         feature_map: dict[str, int],
         item_feature: str = "item_id",
+        feature_specs: list | None = None,
     ) -> None:
+        # ``feature_specs`` is injected by the runner for algos that need
+        # per-feature type info; Popularity is insertion-order based and
+        # doesn't consume it, but must accept the kwarg so Registry.build
+        # can inject it uniformly.
+        del feature_specs
         if item_feature not in feature_map:
             raise ValueError(
                 f"Popularity requires '{item_feature}' in feature_map; "
@@ -182,3 +189,39 @@ class Popularity(Algorithm):
     def train(self, mode: bool = True):
         self.training = bool(mode)
         return self
+
+    # --- Persistence -------------------------------------------------
+
+    def save(self, path) -> None:
+        """Pickle the fitted popularity scores + column metadata.
+
+        Written as a small ``.pkl`` beside Lightning checkpoints so the
+        classical bypass can round-trip through ``recsys submit``.
+        """
+        import pickle
+        import torch
+
+        path = Path(path)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        scores = self.popularity_scores
+        blob = {
+            "item_feature": self.item_feature,
+            "item_column": self.item_column,
+            "vocab_size": self.vocab_size,
+            "popularity_scores": (
+                scores.detach().cpu() if isinstance(scores, torch.Tensor) else scores
+            ),
+        }
+        with path.open("wb") as fh:
+            pickle.dump(blob, fh)
+
+    def load(self, path) -> None:
+        """Restore popularity scores previously written by :meth:`save`."""
+        import pickle
+
+        with Path(path).open("rb") as fh:
+            blob = pickle.load(fh)
+        self.item_feature = blob["item_feature"]
+        self.item_column = blob["item_column"]
+        self.vocab_size = blob["vocab_size"]
+        self.popularity_scores = blob["popularity_scores"]

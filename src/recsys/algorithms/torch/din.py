@@ -108,6 +108,8 @@ class DeepInterestNetwork(nn.Module):
         dense_dim: int = 0,
         attention_mlp_dims: list[int] | None = None,
         dropout: float = 0.0,
+        streams: list[dict] | None = None,
+        feature_specs: list | None = None,
     ):
         """
         Args:
@@ -115,28 +117,90 @@ class DeepInterestNetwork(nn.Module):
             embed_dim: Embedding dimension for sparse features.
             mlp_dims: Hidden dimensions for the final prediction MLP.
             item_feature: Name of the target item feature.
-            history_feature: Name of the history feature (sequence of item ids).
-            sparse_feature_names: List of names of additional sparse features (e.g., user_id, context).
+            history_feature: Name of the history feature (sequence of item
+                ids). Ignored when ``streams`` is provided.
+            sparse_feature_names: List of names of additional sparse features.
             dense_dim: Number of dense feature dimensions (if any).
-            attention_mlp_dims: Hidden dimensions for the attention MLP in LocalActivationUnit.
+            attention_mlp_dims: Hidden dimensions for the attention MLP.
             dropout: Dropout probability used in MLPs.
+            streams: Optional list of parallel history stream configs. When
+                present, DIN runs in multi-stream mode: one embedding table
+                + one attention unit per stream, outputs concatenated. Each
+                dict must have ``name``, ``history_feature``, and either
+                ``vocab_size`` or a ``feature_map`` lookup name. The first
+                stream is the "primary" one whose embedding also scores
+                the target item. Single-stream backcompat is preserved
+                when ``streams`` is None.
+            feature_specs: Accepted but currently unused; injected by the
+                runner uniformly across algorithms.
         """
         super().__init__()
+        del feature_specs  # not consumed directly; streams carry what we need
         sparse_feature_names = sparse_feature_names or []
         attention_mlp_dims = attention_mlp_dims or [64, 32]
 
         if item_feature not in feature_map:
             raise ValueError(f"Missing item feature '{item_feature}' in feature_map")
 
+        # Normalize into internal stream configs. Single-stream default
+        # preserves the pre-multi-stream batch layout exactly.
+        if streams is None:
+            resolved_streams = [
+                {
+                    "name": "item",
+                    "history_feature": history_feature,
+                    "vocab_size": int(feature_map[item_feature]),
+                }
+            ]
+        else:
+            resolved_streams = []
+            for i, s in enumerate(streams):
+                if "name" not in s or "history_feature" not in s:
+                    raise ValueError(
+                        f"stream {i} needs 'name' and 'history_feature' keys"
+                    )
+                vocab = s.get("vocab_size")
+                if vocab is None:
+                    lookup_name = s.get("feature_map_key", s["history_feature"])
+                    if lookup_name not in feature_map:
+                        raise ValueError(
+                            f"stream '{s['name']}' needs vocab_size or a "
+                            f"feature_map entry under '{lookup_name}'"
+                        )
+                    vocab = int(feature_map[lookup_name])
+                resolved_streams.append(
+                    {
+                        "name": s["name"],
+                        "history_feature": s["history_feature"],
+                        "vocab_size": int(vocab),
+                    }
+                )
+
         self.item_feature = item_feature
-        self.history_feature = history_feature
+        self.history_feature = history_feature  # back-compat reference
         self.sparse_feature_names = sparse_feature_names
         self.dense_dim = dense_dim
+        self._streams = resolved_streams
+        # The target item is scored against the first stream's vocab
+        # (that's the "canonical item" stream).
+        self._primary_stream_name = resolved_streams[0]["name"]
 
-        # Target item embedding
-        self.item_embedding = nn.Embedding(feature_map[item_feature], embed_dim)
+        # One embedding + one attention unit per stream.
+        self.stream_embeddings = nn.ModuleDict(
+            {
+                s["name"]: nn.Embedding(s["vocab_size"], embed_dim)
+                for s in resolved_streams
+            }
+        )
+        self.stream_attentions = nn.ModuleDict(
+            {
+                s["name"]: LocalActivationUnit(
+                    embed_dim, attention_mlp_dims, dropout
+                )
+                for s in resolved_streams
+            }
+        )
 
-        # Other sparse feature embeddings
         self.sparse_embeddings = nn.ModuleDict(
             {
                 name: nn.Embedding(feature_map[name], embed_dim)
@@ -144,78 +208,78 @@ class DeepInterestNetwork(nn.Module):
             }
         )
 
-        # Attention layer for user history
-        self.attention = LocalActivationUnit(embed_dim, attention_mlp_dims, dropout)
-
-        # Input dimension for the final MLP:
-        # - Sparse features embeddings (len(sparse_feature_names) * embed_dim)
-        # - Target item embedding (embed_dim)
-        # - User interest vector (embed_dim) from attention
-        # - Dense features (dense_dim)
-        mlp_input_dim = embed_dim * (len(sparse_feature_names) + 2) + dense_dim
-
+        # Final MLP input = sparse (N*E) + target (E) + K interest vecs (K*E) + dense
+        n_streams = len(resolved_streams)
+        mlp_input_dim = (
+            embed_dim * (len(sparse_feature_names) + 1 + n_streams) + dense_dim
+        )
         self.mlp = build_mlp(mlp_input_dim, mlp_dims, dropout)
-
         output_dim = mlp_dims[-1] if mlp_dims else mlp_input_dim
         self.output = nn.Linear(output_dim, 1)
 
     def forward(self, x: dict[str, torch.Tensor]) -> torch.Tensor:
-        """
-        Forward pass.
+        """Forward pass.
 
-        Args:
-            x: Dictionary containing input tensors:
-                - x[item_feature] or x["target_item"]: (B,) Target item indices.
-                - x[history_feature] or x["history_items"]: (B, T) User history item indices.
-                - x[f"{history_feature}_mask"] or x["history_mask"]: (B, T) Boolean mask for history (optional).
-                - x["sparse_features"]: (B, N) Tensor of other sparse feature indices (optional).
-                - x["dense_features"]: (B, D) Tensor of dense features (optional).
-
-        Returns:
-            Logits of shape (B, 1).
+        In single-stream mode the batch dict is unchanged from the
+        pre-refactor layout (``item_feature``, ``history_feature``,
+        ``<history_feature>_mask``). In multi-stream mode each stream
+        consumes its own ``history_feature`` key plus the matching
+        ``_mask``.
         """
         target_item = x.get("target_item", x.get(self.item_feature))
-        history_items = x.get("history_items", x.get(self.history_feature))
-        history_mask = x.get(
-            "history_mask", x.get(f"{self.history_feature}_mask")
-        )
+        if target_item is None:
+            raise ValueError("DIN requires a target item input")
 
-        if target_item is None or history_items is None:
-            raise ValueError("DIN requires target item and history item inputs")
+        # Target is scored via the primary stream's embedding table.
+        primary_embed = self.stream_embeddings[self._primary_stream_name]
+        item_emb = primary_embed(target_item)  # (B, E)
 
-        if history_mask is not None:
-            history_mask = history_mask.bool()
+        interest_vecs: list[torch.Tensor] = []
+        for stream in self._streams:
+            hist_key = stream["history_feature"]
+            history_items = x.get(hist_key)
+            if history_items is None and stream["name"] == "item":
+                # Legacy alias.
+                history_items = x.get("history_items")
+            if history_items is None:
+                raise ValueError(
+                    f"DIN stream '{stream['name']}' needs history tensor "
+                    f"at batch key '{hist_key}'"
+                )
+            mask_key = f"{hist_key}_mask"
+            history_mask = x.get(mask_key)
+            if history_mask is None and stream["name"] == "item":
+                history_mask = x.get("history_mask")
+            if history_mask is not None:
+                history_mask = history_mask.bool()
 
-        # 1. Embed target item and history items
-        item_emb = self.item_embedding(target_item)  # (B, E)
-        history_emb = self.item_embedding(history_items)  # (B, T, E)
-
-        # 2. Calculate user interest vector via attention
-        interest_vec = self.attention(item_emb, history_emb, history_mask)  # (B, E)
+            history_emb = self.stream_embeddings[stream["name"]](history_items)
+            interest_vec = self.stream_attentions[stream["name"]](
+                item_emb, history_emb, history_mask
+            )
+            interest_vecs.append(interest_vec)
 
         features: list[torch.Tensor] = []
 
-        # 3. Process other sparse features
         if self.sparse_feature_names:
             sparse_tensor = x.get("sparse_features")
             if sparse_tensor is None:
-                raise ValueError("sparse_features input required for DIN but not provided in batch")
+                raise ValueError(
+                    "sparse_features input required for DIN but not provided in batch"
+                )
             if sparse_tensor.shape[1] != len(self.sparse_feature_names):
                 raise ValueError(
                     f"sparse_features column count ({sparse_tensor.shape[1]}) "
                     f"does not match config ({len(self.sparse_feature_names)})"
                 )
-
-            sparse_embs = []
-            for idx, name in enumerate(self.sparse_feature_names):
-                sparse_embs.append(self.sparse_embeddings[name](sparse_tensor[:, idx]))
-
-            # Concatenate all sparse embeddings: (B, N*E)
+            sparse_embs = [
+                self.sparse_embeddings[name](sparse_tensor[:, idx])
+                for idx, name in enumerate(self.sparse_feature_names)
+            ]
             features.append(torch.cat(sparse_embs, dim=-1))
 
-        # 4. Concatenate all features
         features.append(item_emb)
-        features.append(interest_vec)
+        features.extend(interest_vecs)
 
         if self.dense_dim > 0:
             dense_tensor = x.get("dense_features")
@@ -223,9 +287,5 @@ class DeepInterestNetwork(nn.Module):
                 features.append(dense_tensor)
 
         mlp_input = torch.cat(features, dim=-1)
-
-        # 5. Final MLP and prediction
         hidden = self.mlp(mlp_input)
-        logits = self.output(hidden)
-
-        return logits
+        return self.output(hidden)

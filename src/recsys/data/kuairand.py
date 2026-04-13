@@ -21,14 +21,14 @@ from __future__ import annotations
 
 import logging
 import shutil
-import sys
 import tarfile
-import urllib.request
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable
 
 import polars as pl
+
+from recsys.data._download import http_download_atomic
 
 LOGGER = logging.getLogger(__name__)
 
@@ -117,53 +117,15 @@ def _is_present(paths: KuaiRandPaths) -> bool:
     return any(paths.data_dir.glob("*.csv"))
 
 
-def _download_with_progress(url: str, dest: Path, chunk_size: int = 1 << 20) -> None:
-    """Stream ``url`` to ``dest`` with periodic byte-count progress logging."""
-    part = dest.with_suffix(dest.suffix + ".part")
-    part.parent.mkdir(parents=True, exist_ok=True)
-    req = urllib.request.Request(url, headers=_HTTP_HEADERS)
-    LOGGER.info("KuaiRand: downloading %s -> %s", url, dest)
-    try:
-        with urllib.request.urlopen(req, timeout=60) as response:
-            total = response.headers.get("Content-Length")
-            total_bytes = int(total) if total else None
-            downloaded = 0
-            last_report = 0
-            with part.open("wb") as fh:
-                while True:
-                    chunk = response.read(chunk_size)
-                    if not chunk:
-                        break
-                    fh.write(chunk)
-                    downloaded += len(chunk)
-                    if downloaded - last_report >= 8 * (1 << 20):
-                        last_report = downloaded
-                        if total_bytes:
-                            pct = 100.0 * downloaded / total_bytes
-                            msg = (
-                                f"  KuaiRand download: {downloaded/1e6:.1f}/"
-                                f"{total_bytes/1e6:.1f} MB ({pct:5.1f}%)"
-                            )
-                        else:
-                            msg = f"  KuaiRand download: {downloaded/1e6:.1f} MB"
-                        print(msg, file=sys.stderr, flush=True)
-    except BaseException:
-        if part.exists():
-            try:
-                part.unlink()
-            except OSError:
-                pass
-        raise
-    if total_bytes is not None and downloaded != total_bytes:
-        try:
-            part.unlink()
-        except OSError:
-            pass
-        raise RuntimeError(
-            f"KuaiRand download truncated: got {downloaded} bytes, "
-            f"expected {total_bytes} (url={url})"
-        )
-    part.replace(dest)
+def _download_with_progress(url: str, dest: Path) -> None:
+    """KuaiRand wrapper around the shared ``http_download_atomic`` helper."""
+    http_download_atomic(
+        url,
+        dest,
+        headers=_HTTP_HEADERS,
+        progress_every_bytes=8 * (1 << 20),
+        progress_label="KuaiRand download",
+    )
 
 
 def download(

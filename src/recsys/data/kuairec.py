@@ -23,14 +23,14 @@ from __future__ import annotations
 
 import logging
 import shutil
-import sys
-import urllib.request
 import zipfile
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable
 
 import polars as pl
+
+from recsys.data._download import http_download_atomic
 
 LOGGER = logging.getLogger(__name__)
 
@@ -77,61 +77,14 @@ def _is_present(paths: KuaiRecPaths) -> bool:
     return (paths.data_dir / KUAIREC_SENTINEL_FILE).exists()
 
 
-def _download_with_progress(url: str, dest: Path, chunk_size: int = 1 << 20) -> None:
-    """Stream ``url`` to ``dest`` with periodic byte-count progress logging.
-
-    Writes to ``dest.with_suffix(dest.suffix + '.part')`` first and
-    atomically renames on success so interrupted downloads don't leave a
-    truncated file behind.
-    """
-    part = dest.with_suffix(dest.suffix + ".part")
-    part.parent.mkdir(parents=True, exist_ok=True)
-    req = urllib.request.Request(url, headers=_HTTP_HEADERS)
-    LOGGER.info("KuaiRec: downloading %s -> %s", url, dest)
-    try:
-        with urllib.request.urlopen(req, timeout=60) as response:
-            total = response.headers.get("Content-Length")
-            total_bytes = int(total) if total else None
-            downloaded = 0
-            last_report = 0
-            with part.open("wb") as fh:
-                while True:
-                    chunk = response.read(chunk_size)
-                    if not chunk:
-                        break
-                    fh.write(chunk)
-                    downloaded += len(chunk)
-                    if downloaded - last_report >= 16 * (1 << 20):
-                        last_report = downloaded
-                        if total_bytes:
-                            pct = 100.0 * downloaded / total_bytes
-                            msg = (
-                                f"  KuaiRec download: {downloaded/1e6:.1f}/"
-                                f"{total_bytes/1e6:.1f} MB ({pct:5.1f}%)"
-                            )
-                        else:
-                            msg = f"  KuaiRec download: {downloaded/1e6:.1f} MB"
-                        print(msg, file=sys.stderr, flush=True)
-    except BaseException:
-        if part.exists():
-            try:
-                part.unlink()
-            except OSError:
-                pass
-        raise
-    if total_bytes is not None and downloaded != total_bytes:
-        # The connection ended cleanly but we got fewer bytes than the
-        # server's Content-Length. Treat as a failed download so the
-        # caller can retry, rather than renaming a truncated file.
-        try:
-            part.unlink()
-        except OSError:
-            pass
-        raise RuntimeError(
-            f"KuaiRec download truncated: got {downloaded} bytes, "
-            f"expected {total_bytes} (url={url})"
-        )
-    part.replace(dest)
+def _download_with_progress(url: str, dest: Path) -> None:
+    """KuaiRec wrapper around the shared ``http_download_atomic`` helper."""
+    http_download_atomic(
+        url,
+        dest,
+        headers=_HTTP_HEADERS,
+        progress_label="KuaiRec download",
+    )
 
 
 def download(

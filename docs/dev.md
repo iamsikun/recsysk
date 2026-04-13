@@ -347,3 +347,61 @@ A user, starting from a clean clone with MovieLens already under `./datasets`, c
   - **Criteo / Avazu** — large-scale CTR-style ranking benchmarks (only if ad recommendation is in scope).
 - ~~**Framework-agnostic fit path for classical algos.**~~ *Landed in v2.0.* The runner now branches on `isinstance(algo, Algorithm)`; classical algos like `popularity` skip Lightning entirely and have their `fit` called directly. `Popularity` no longer subclasses `nn.Module`.
 - ~~**Ranking metrics for sequential / dict-batch algos.**~~ *Landed in v2.0.* `CTREvaluator.evaluate_full` now has a `_dict_batch_ranking` path that unwraps `torch.utils.data.Subset`, takes the first positive row per user, and scores it against sampled-K negatives by stacking the row's history/sparse/dense tensors. NDCG/Recall/HR/MRR work for DIN today.
+
+## v2.1 — competition-style CTR primitives
+
+Motivation: we want to run `recsys` inside downstream competition repos (TAAC2026 / Tencent KDD 2026 ads, future Kaggle drops) without baking any dataset-specific code into the harness. The only dataset-specific thing allowed here is the registry decorator — the loader, schema, benchmark class, and submission format live in the downstream repo. v2.1 adds the generic primitives every competition-style CTR dataset needs.
+
+### New feature types
+
+- `FeatureType.DENSE_VECTOR` — fixed-width float arrays for pretrained embedding columns. `FeatureSpec.vector_dim` carries the width; `feature_map[name]` stores the width (not a vocab size).
+- `FeatureType.MULTI_CATEGORICAL` — variable-length id lists (tags, interest sets). `FeatureSpec.max_len` pads/truncates; 0 is reserved for padding. Optional `weighted=True` emits a paired `<name>_weight` Float32 array, consumed by `nn.EmbeddingBag` in `sum` mode.
+- `FeatureSpec.stream: str | None` — semantic tag for sequence features, used by the multi-stream DIN path below.
+
+### Encoder + tabular dataset shape
+
+- `encode_features` in `data/transforms/tabular.py` handles all four types. Dense vectors pass through as `pl.Array(Float32, vector_dim)`; multi-cat goes through a Python-level vocab + pad/truncate and lands as `pl.Array(Int64, max_len)`.
+- `build_tabular_dataset` auto-switches between the legacy flat-tensor `TabularDataset` (when every feature is scalar) and a new `TabularDictDataset` (when any non-scalar feature is present). Existing MovieLens / KuaiRec / KuaiRand benchmarks still hit the flat-tensor path and are bit-for-bit unchanged.
+
+### Algo wiring
+
+- The runner injects `feature_specs=data.feature_specs` into `ALGO_REGISTRY.build` alongside `feature_map`. Every built-in algo (`deepfm`, `din`, `popularity`) accepts the kwarg; classical algos that don't need it simply discard it.
+- `DeepFM` has a dual-mode forward:
+  - **Legacy / all-scalar:** `(B, n_fields)` integer tensor → single shared embedding table + FM interaction, same as pre-v2.1.
+  - **Mixed:** dict batch with one tensor per feature; categoricals go through per-field `nn.Embedding`, dense vectors through `nn.Linear(vector_dim, embed_dim)`, multi-cat through `nn.EmbeddingBag`. FM second-order interaction fires over the stacked per-field embeddings; first-order term is skipped in mixed mode (no shared offset table).
+
+### Multi-stream sequence features
+
+- `SequenceSpec` refactored from one-item-one-history to `(target_feature, streams: tuple[SequenceStream, ...])`. A `SequenceSpec.single_stream(...)` factory preserves the pre-v2.1 MovieLens / KuaiRec layout; existing benchmark builders call it and are unchanged.
+- `build_sequence_dataset` emits `hist_<history_feature>` + `hist_<history_feature>_mask` per stream. The first event per user still seeds history buffers without producing a training row.
+- `DIN` gained an optional `streams: list[dict]` kwarg. When present, it builds one `nn.Embedding` + one `LocalActivationUnit` per stream and concatenates the K interest vectors into the final MLP. The target item is scored against the first stream's embedding table (the "primary" stream). Single-stream default preserves pre-v2.1 behavior exactly — the existing `din_on_movielens_seq` gate is unchanged.
+
+### Download helpers + HF Hub fetcher
+
+- Factored `http_download_atomic` out of `kuairec.py` / `kuairand.py` into a shared `src/recsys/data/_download.py`. Both loaders now wrap it; behavior (atomic `.part` → final rename, `Content-Length` verification, curl-style User-Agent to bypass Zenodo throttling) is identical.
+- New `fetch_hf_dataset(repo_id, cache_dir, revision=None, allow_patterns=None, token=None)` helper wraps `huggingface_hub.snapshot_download`. Added `huggingface-hub>=0.24` to `[project.dependencies]`. Downstream competition loaders (e.g. TAAC2026) can call this directly without having to re-implement the atomic-rename dance.
+
+### `Task.export_predictions` + `recsys submit` verb
+
+- New `Task.export_predictions(algo, benchmark, benchmark_data, out_path)` abstract hook. Implemented on `CTRTask` by iterating the test dataset via a new module-level `iter_predictions(model, dataset)` helper in `evaluator.py` that handles both `(x, y)` tuple datasets and dict-valued (`SequenceDataset` / `TabularDictDataset`) datasets.
+- New `Benchmark.write_submission(predictions, out_path)` default hook: writes a 2-column `row_id,score` CSV. Subclasses override to emit competition-specific shapes. Benchmark owns the format — the harness stays dataset-agnostic.
+- Model persistence:
+  - **Torch algos:** the runner attaches a Lightning `ModelCheckpoint` callback pointing at `<results_dir>/checkpoints/<benchmark>-<algo>-<config_hash>-seed<seed>.ckpt`, force-enabling `enable_checkpointing` even when the smoke-gate YAML sets it to `false`. A JSON sidecar next to the ckpt stores the exact `(algo_cfg, benchmark_cfg, seed)` used at fit time.
+  - **Classical algos:** `Popularity.save/load` persist a pickle next to the checkpoints dir. Algos that don't implement `save` skip persistence and `recsys submit` raises a clear error if you try to load them.
+- `RunResult` gained a `model_checkpoint_path` column; `ResultStore.get_run(benchmark, algo, config_hash=..., seed=..., latest=True)` resolves a single row back to a `RunResult`.
+- New `recsys submit --benchmark <name> --algo <name> [--config-hash <h>] [--seed <n>] --out <path> [--results-dir <dir>]` verb:
+  1. Query `ResultStore.get_run` for the matching run.
+  2. Read the sidecar JSON next to `model_checkpoint_path` to recover the original configs.
+  3. Rebuild the benchmark + algo (same `feature_map` / `feature_specs` injection as `bench`).
+  4. Load the checkpoint (Lightning `.ckpt` via `torch.load` + `load_state_dict` onto a fresh `LightningCTRTask` shell since `LightningCTRTask` doesn't use `save_hyperparameters`; classical pickles via `algo.load(path)`).
+  5. Call `benchmark.task.export_predictions`, which streams predictions into `benchmark.write_submission(...)`.
+
+### Verified
+
+- Smoke gate: `deepfm_on_movielens_ctr`, `din_on_movielens_seq`, `popularity_on_movielens_ctr`, `popularity_on_kuairand_ctr` all still pass (metrics unchanged modulo seed noise). `popularity_on_kuairec_ctr` is blocked on a pre-existing on-disk layout mismatch (`KuaiRec/KuaiRec 2.0/` vs expected `KuaiRec/data/`) — unrelated to v2.1.
+- End-to-end `recsys submit` round-trips both `popularity_on_movielens_ctr` and `deepfm_on_movielens_ctr`, producing 4M-row `row_id,score` CSVs from the persisted checkpoints.
+
+### Deferred (explicitly *not* in v2.1)
+
+- **Memmap-backed long-sequence loader.** The original primitives list included a `np.memmap` / `.npy`-backed sequence store for datasets with >1k-step histories. No in-repo benchmark currently needs it — will land when the first dataset that actually requires it (likely TAAC2026 on the full split) arrives.
+- **Unlabeled test split contract.** `BenchmarkData.test` still aliases `val` for every built-in benchmark. The new submit flow works fine on labeled test (labels are simply ignored by `iter_predictions`); a real unlabeled split lands when a benchmark subclass needs it.

@@ -60,7 +60,9 @@ class MovieLensTabularBuilder(DatasetBuilder):
         df = self._load_ratings()
         df = apply_label_threshold(df, rating_col="rating", threshold=self.config.rating_threshold)
         df, feature_map, processed_cols = encode_features(df, self.config.features)
-        full_dataset = build_tabular_dataset(df, processed_cols)
+        full_dataset = build_tabular_dataset(
+            df, processed_cols, feature_specs=self.config.features
+        )
         train_size = int(len(full_dataset) * self.config.train_split)
         val_size = len(full_dataset) - train_size
         train_dataset, val_dataset = random_split(
@@ -93,7 +95,7 @@ class MovieLensSequenceBuilder(MovieLensTabularBuilder):
             if self.seq_config.item_feature in feature_map:
                 feature_map[self.seq_config.item_feature] += 1
 
-        spec = SequenceSpec(
+        spec = SequenceSpec.single_stream(
             item_feature=self.seq_config.item_feature,
             history_feature=self.seq_config.history_feature,
             max_history_len=self.seq_config.max_history_len,

@@ -45,3 +45,26 @@ class SequenceDataset(Dataset):
         return {key: value[idx] for key, value in self.features.items()}, self.labels[
             idx
         ]
+
+
+class TabularDictDataset(Dataset):
+    """Dict-valued tabular dataset, shape-compatible with SequenceDataset.
+
+    Used by :func:`recsys.data.transforms.tabular.build_tabular_dataset`
+    when a feature set contains non-scalar columns (``dense_vector`` or
+    ``multi_categorical``) that can't be packed into a single flat
+    ``(B, n_fields)`` tensor. Rows are ``(dict[str, Tensor], label)``.
+    """
+
+    def __init__(self, features: dict[str, torch.Tensor], labels: torch.Tensor):
+        self.features = features
+        self.labels = labels
+
+    def __len__(self) -> int:
+        return len(self.labels)
+
+    def __getitem__(self, idx):
+        return (
+            {key: value[idx] for key, value in self.features.items()},
+            self.labels[idx],
+        )

@@ -61,7 +61,23 @@ def build_feature_specs(feature_configs: List[Dict[str, Any]]) -> List[FeatureSp
         # 3. Optional group_id (only meaningful for GROUP role, but we accept it)
         group_id = cfg.pop("group_id", None)
 
-        # 4. Create Dataclass
+        # 4. Validate type-specific required fields.
+        if f_type == FeatureType.DENSE_VECTOR:
+            if cfg.get("vector_dim") is None:
+                raise ValueError(
+                    f"Feature '{name}' has type=dense_vector but no "
+                    f"'vector_dim' is set. dense_vector features must "
+                    f"declare a fixed width."
+                )
+        if f_type == FeatureType.MULTI_CATEGORICAL:
+            if cfg.get("max_len") is None:
+                raise ValueError(
+                    f"Feature '{name}' has type=multi_categorical but no "
+                    f"'max_len' is set. multi_categorical features must "
+                    f"declare a pad/truncate length."
+                )
+
+        # 5. Create Dataclass
         spec = FeatureSpec(type=f_type, role=role, group_id=group_id, **cfg)
         specs.append(spec)
 

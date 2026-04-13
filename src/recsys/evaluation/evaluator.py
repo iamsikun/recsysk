@@ -526,3 +526,77 @@ def _to_device(x, device: torch.device):
         moved = [_to_device(v, device) for v in x]
         return type(x)(moved) if isinstance(x, tuple) else moved
     return x
+
+
+def iter_predictions(
+    model: torch.nn.Module,
+    dataset: Any,
+    *,
+    batch_size: int = 1024,
+    device: torch.device | str | None = None,
+) -> Iterable[tuple[int, float]]:
+    """Yield ``(row_id, score)`` pairs for every row in ``dataset``.
+
+    Shape-agnostic: handles both ``(x, y)`` tuple datasets (TabularDataset)
+    and ``(dict, y)`` datasets (SequenceDataset / TabularDictDataset).
+    ``row_id`` is the dataset row index — benchmarks that want external
+    ids can override :meth:`recsys.benchmarks.base.Benchmark.write_submission`
+    and translate.
+
+    Labels are read but ignored so this function works against
+    *unlabeled* test splits as well as labeled ones. Scores are
+    sigmoid(logits); callers that want raw logits can wrap.
+    """
+    from torch.utils.data import DataLoader, Subset
+
+    indices = (
+        list(dataset.indices) if isinstance(dataset, Subset) else None
+    )
+
+    if device is None:
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    else:
+        device = torch.device(device) if not isinstance(device, torch.device) else device
+
+    def _collate(samples):
+        # samples: list of (x, y) where x is either a Tensor or a dict.
+        first_x = samples[0][0]
+        labels = torch.stack(
+            [torch.as_tensor(s[1]) for s in samples], dim=0
+        )
+        if isinstance(first_x, dict):
+            batch = {
+                key: torch.stack([s[0][key] for s in samples], dim=0)
+                for key in first_x
+            }
+            return batch, labels
+        xs = torch.stack([s[0] for s in samples], dim=0)
+        return xs, labels
+
+    loader = DataLoader(
+        dataset,
+        batch_size=batch_size,
+        shuffle=False,
+        num_workers=0,
+        collate_fn=_collate,
+    )
+
+    was_training = model.training
+    model.eval()
+    try:
+        with torch.no_grad():
+            row_offset = 0
+            for batch in loader:
+                x, _y = batch
+                x = _to_device(x, device)
+                logits = model(x)
+                probs = torch.sigmoid(logits).detach().float().cpu().numpy().reshape(-1)
+                for i, score in enumerate(probs):
+                    if indices is not None:
+                        yield int(indices[row_offset + i]), float(score)
+                    else:
+                        yield row_offset + i, float(score)
+                row_offset += len(probs)
+    finally:
+        if was_training:
+            model.train()

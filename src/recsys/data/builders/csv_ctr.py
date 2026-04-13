@@ -80,7 +80,9 @@ class CsvCtrBuilder(DatasetBuilder):
                 pl.col(self.config.label_column).cast(pl.Float32).alias("label")
             )
         df, feature_map, processed_cols = encode_features(df, self.config.features)
-        full_dataset = build_tabular_dataset(df, processed_cols)
+        full_dataset = build_tabular_dataset(
+            df, processed_cols, feature_specs=self.config.features
+        )
         train_size = int(len(full_dataset) * self.config.train_split)
         val_size = len(full_dataset) - train_size
         train_dataset, val_dataset = random_split(

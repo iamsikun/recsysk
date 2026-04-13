@@ -9,6 +9,7 @@ bundle and returning a metric dict.
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
+from pathlib import Path
 from typing import Any
 
 from recsys.algorithms.base import TaskType
@@ -38,5 +39,25 @@ class Task(ABC):
                 train/val/test splits and datamodule handle.
             metric_names: Names of metrics to compute. Unknown keys are
                 filtered out.
+        """
+        raise NotImplementedError
+
+    def export_predictions(
+        self,
+        algo: Any,
+        benchmark: Any,
+        benchmark_data: Any,
+        out_path: Path,
+    ) -> None:
+        """Write per-row predictions for ``benchmark_data.test`` to disk.
+
+        The default implementation iterates the test dataset, runs the
+        algorithm's forward pass, and delegates the output format to
+        ``benchmark.write_submission`` — every benchmark gets a
+        consistent ``recsys submit`` CLI verb while still owning its
+        competition-specific output shape.
+
+        Subclasses that need task-specific logic (e.g. retrieval where
+        ranks matter more than scores) can override.
         """
         raise NotImplementedError

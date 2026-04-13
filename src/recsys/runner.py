@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import logging
 import os
 import subprocess
@@ -11,6 +12,7 @@ from typing import Any
 import lightning as L
 import torch
 import yaml
+from lightning.pytorch.callbacks import ModelCheckpoint
 
 from recsys.algorithms.base import Algorithm
 from recsys.engine import CTRTask as LightningCTRTask
@@ -208,13 +210,28 @@ def run_experiment(
     # torch path; they're not algorithm constructor kwargs.
     opt_override = algo_build_cfg.pop("optimizer", None)
     loss_override = algo_build_cfg.pop("loss", None)
-    algo = ALGO_REGISTRY.build(algo_build_cfg, feature_map=data.feature_map)
+    algo = ALGO_REGISTRY.build(
+        algo_build_cfg,
+        feature_map=data.feature_map,
+        feature_specs=data.feature_specs,
+    )
 
     # In smoke mode (any limit_val_batches set) cap the ranking-metric
     # user loop so the gate stays cheap.
     max_users_override = None
     if trainer_overrides and trainer_overrides.get("limit_val_batches") is not None:
         max_users_override = 200
+
+    # ---- Prepare checkpoint + sidecar paths for ``recsys submit``. ----
+    # The store is used to pick a stable directory; if no store was
+    # passed we fall back to "no persistence" behavior.
+    algo_cfg_hash = config_hash(algo_cfg)
+    algo_name = str(algo_cfg.get("name", "unknown"))
+    checkpoint_dir: Path | None = None
+    checkpoint_path_out: str | None = None
+    if results_dir is not None:
+        checkpoint_dir = Path(results_dir) / "checkpoints"
+        checkpoint_dir.mkdir(parents=True, exist_ok=True)
 
     # Classical bypass: algorithms that subclass the framework-agnostic
     # :class:`Algorithm` protocol directly (i.e. not an ``nn.Module``)
@@ -228,6 +245,29 @@ def run_experiment(
         )
         algo.fit(data.train, data.val)
         eval_target: Any = algo
+
+        # Classical save/load: best-effort pickle of the fitted scorer so
+        # ``recsys submit`` can reload it. Algos that don't implement
+        # ``save`` simply skip persistence — submit will raise a clear
+        # error later when it tries to load.
+        if checkpoint_dir is not None:
+            stem = f"{benchmark.name}-{algo_name}-{algo_cfg_hash}-seed{seed}"
+            ckpt_path = checkpoint_dir / f"{stem}.pkl"
+            try:
+                algo.save(ckpt_path)
+                checkpoint_path_out = str(ckpt_path)
+                _write_sidecar(
+                    checkpoint_dir / f"{stem}.json",
+                    algo_cfg=algo_cfg,
+                    benchmark_cfg=benchmark_cfg,
+                    seed=seed,
+                )
+            except NotImplementedError:
+                LOGGER.info(
+                    "run_experiment: %s does not implement save(); "
+                    "skipping classical checkpoint",
+                    algo.__class__.__name__,
+                )
     else:
         optimizer_cfg = {**_DEFAULT_OPTIMIZER, **(opt_override or {})}
         optimizer_cls = OPTIMIZER_REGISTRY.get(optimizer_cfg.pop("name"))
@@ -243,10 +283,43 @@ def run_experiment(
         trainer_cfg: dict[str, Any] = {"max_epochs": 1}
         if trainer_overrides:
             trainer_cfg.update(trainer_overrides)
+
+        # Lightning ModelCheckpoint — save the final state after fit so
+        # ``recsys submit`` can reload without re-training.
+        callbacks = list(trainer_cfg.pop("callbacks", None) or [])
+        ckpt_callback: ModelCheckpoint | None = None
+        if checkpoint_dir is not None:
+            stem = f"{benchmark.name}-{algo_name}-{algo_cfg_hash}-seed{seed}"
+            ckpt_callback = ModelCheckpoint(
+                dirpath=str(checkpoint_dir),
+                filename=stem,
+                save_last=False,
+                save_top_k=1,
+                monitor=None,
+                save_on_train_epoch_end=True,
+            )
+            callbacks.append(ckpt_callback)
+            # Smoke-gate YAMLs typically set ``enable_checkpointing:
+            # false`` to keep the smoke run cheap. That directly
+            # contradicts attaching a ModelCheckpoint — flip the flag
+            # so Lightning lets us persist what ``recsys submit`` needs.
+            trainer_cfg["enable_checkpointing"] = True
+        trainer_cfg["callbacks"] = callbacks
         trainer = L.Trainer(**trainer_cfg)
 
         LOGGER.info("run_experiment: starting trainer.fit")
         trainer.fit(lightning_task, datamodule=data.datamodule)
+
+        if ckpt_callback is not None and checkpoint_dir is not None:
+            best = ckpt_callback.best_model_path or ckpt_callback.last_model_path
+            if best:
+                checkpoint_path_out = str(best)
+                _write_sidecar(
+                    checkpoint_dir / f"{stem}.json",
+                    algo_cfg=algo_cfg,
+                    benchmark_cfg=benchmark_cfg,
+                    seed=seed,
+                )
 
         device = getattr(trainer.strategy, "root_device", None)
         if device is None:
@@ -273,18 +346,18 @@ def run_experiment(
     if effective_store is None and results_dir is not None:
         effective_store = ResultStore(results_dir)
     if effective_store is not None:
-        algo_name = str(algo_cfg.get("name", "unknown"))
         result = RunResult(
             benchmark=benchmark.name,
             benchmark_version=benchmark.version(),
             algo=algo_name,
-            algo_config_hash=config_hash(algo_cfg),
+            algo_config_hash=algo_cfg_hash,
             seed=int(seed),
             metrics={k: float(v) for k, v in metrics.items()},
             runtime_s=float(runtime_s),
             timestamp=datetime.now(timezone.utc).isoformat(),
             code_sha=_git_sha(),
             env_fingerprint=None,
+            model_checkpoint_path=checkpoint_path_out,
         )
         effective_store.write(result)
         LOGGER.info(
@@ -293,3 +366,23 @@ def run_experiment(
         )
 
     return metrics
+
+
+def _write_sidecar(
+    path: Path,
+    *,
+    algo_cfg: dict[str, Any],
+    benchmark_cfg: dict[str, Any],
+    seed: int,
+) -> None:
+    """Write a small JSON sidecar next to a checkpoint so ``recsys submit``
+    can reconstruct the exact benchmark + algo configs that produced it.
+    """
+    path.parent.mkdir(parents=True, exist_ok=True)
+    payload = {
+        "algo_cfg": algo_cfg,
+        "benchmark_cfg": benchmark_cfg,
+        "seed": int(seed),
+    }
+    with path.open("w") as fh:
+        json.dump(payload, fh, indent=2, default=str)

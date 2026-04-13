@@ -11,7 +11,8 @@ import hashlib
 import json
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
-from typing import Any, TYPE_CHECKING
+from pathlib import Path
+from typing import Any, Iterable, TYPE_CHECKING
 
 if TYPE_CHECKING:  # pragma: no cover
     from recsys.tasks.base import Task
@@ -21,9 +22,9 @@ if TYPE_CHECKING:  # pragma: no cover
 class BenchmarkData:
     """Fitted / setup-ed datasets + metadata for a benchmark.
 
-    Wave 3 note: the ``test`` slot aliases ``val`` while Wave 4 introduces
-    a proper held-out test split. Evaluators should read from ``val`` (or
-    ``datamodule.val_dataset``) today and migrate to ``test`` later.
+    Wave 3 note: the ``test`` slot historically aliased ``val``; for
+    competition-style benchmarks it may also point at an unlabeled
+    test split that :meth:`Task.export_predictions` iterates over.
     """
 
     train: Any
@@ -68,3 +69,24 @@ class Benchmark(ABC):
         }
         blob = json.dumps(payload, sort_keys=True, default=str).encode("utf-8")
         return hashlib.sha1(blob).hexdigest()[:8]
+
+    def write_submission(
+        self,
+        predictions: Iterable[tuple[Any, float]],
+        out_path: Path,
+    ) -> None:
+        """Write a stream of ``(row_id, score)`` tuples to ``out_path``.
+
+        The default implementation produces a 2-column CSV with header
+        ``row_id,score``. Competition-specific benchmarks can override
+        this to emit a different shape (e.g. Kaggle ``id,target`` CSVs,
+        parquet for fast large-N, or multi-column layouts for top-k
+        retrieval submissions). Override-by-subclass keeps the output
+        format owned by the benchmark, not the task.
+        """
+        import polars as pl
+
+        rows = [{"row_id": r, "score": s} for r, s in predictions]
+        df = pl.DataFrame(rows)
+        Path(out_path).parent.mkdir(parents=True, exist_ok=True)
+        df.write_csv(str(out_path))
