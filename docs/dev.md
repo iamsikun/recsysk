@@ -32,7 +32,7 @@ Write these down so we don't lose them:
 - **Statistical significance tests** beyond per-seed mean ± std (e.g. paired bootstrap, corrected t-tests between algos).
 - **CLI library choice** (see "CLI in v2" below).
 - **Hyperparameter search / sweeps.** v1 runs are single-config, multi-seed. Sweeps come later.
-- **Dataset auto-download.** v1 assumes datasets are already present under `./datasets`.
+- **Dataset auto-download.** v1 assumes datasets are already present under `./datasets`. *Partially landed in v2.0:* the KuaiRec and KuaiRand loaders (`src/recsys/data/{kuairec,kuairand}.py`) auto-download from Zenodo on first use and cache under `./datasets/`. MovieLens still has to be extracted manually.
 
 ## CLI in v2 — typer vs click
 
@@ -315,6 +315,8 @@ A user, starting from a clean clone with MovieLens already under `./datasets`, c
 6. Run `uv run recsys report --benchmark movielens_ctr` and see a table with DeepFM and popularity rows, each showing mean ± std of AUC, LogLoss, NDCG@10/50, Recall@10/50, HR@10/50, MRR.
 7. Implement their own algorithm by subclassing `Algorithm` (or `TorchAlgorithm`), register it, add an experiment YAML, and run it through the same CLI without touching any evaluation code.
 
+*v2.0 extends this list.* `recsys list benchmarks` now also prints `kuairec_ctr` and `kuairand_ctr`; the corresponding `popularity_on_kuairec_ctr` / `popularity_on_kuairand_ctr` experiments exist and write to their own parquet files. DIN on `movielens_seq` now reports real NDCG/Recall/HR/MRR instead of NaN; the classical bypass means popularity skips the Lightning wrapper entirely.
+
 ## Open questions to resolve during the phases (not blocking v1 start)
 
 - **One registry or split registries?** Current code has `MODEL_REGISTRY`, `DATASET_REGISTRY`, etc. in `utils.py`. For the new layout, we likely want `ALGO_REGISTRY`, `BENCHMARK_REGISTRY`, `TASK_REGISTRY`. Resolve in Phase 4 when we introduce the first non-nn.Module algorithm.
@@ -335,7 +337,7 @@ A user, starting from a clean clone with MovieLens already under `./datasets`, c
 - **More classical baselines:** item-KNN, BPR-MF, ALS.
 - **More neural baselines:** SASRec, BERT4Rec, NeuMF.
 - **More benchmarks.** Broaden coverage beyond MovieLens. Status:
-  - **KuaiRec / KuaiRand** — *landed in v2.0.* Loaders at `src/recsys/data/{kuairec,kuairand}.py` (download-or-load-from-local, default to repo-root `datasets/`). Benchmarks: `kuairec_ctr` (small_matrix, `watch_ratio >= 2.0` label) and `kuairand_ctr` (KuaiRand-Pure standard logs, `is_click` label).
+  - **KuaiRec / KuaiRand** — *landed in v2.0.* Loaders at `src/recsys/data/{kuairec,kuairand}.py` (download-or-load-from-local, default to repo-root `datasets/`, atomic `.part` rename with Content-Length verification). Benchmarks: `kuairec_ctr` (small_matrix, `watch_ratio >= 2.0` label) and `kuairand_ctr` (KuaiRand-Pure standard logs, `is_click` label). **KuaiRand-Pure is validated end-to-end via the popularity smoke gate.** **KuaiRec data acquisition is currently deferred:** the 432 MB `KuaiRec.zip` on Zenodo is being served at ~0–22 KB/s (verified via both the loader and direct `curl --range`), making the first-run download infeasible in practice. The loader code is in place and will just work once Zenodo is less congested or the user drops a pre-extracted `KuaiRec/data/` tree under `datasets/` manually.
   - **Amazon Reviews** (Books, Beauty, Electronics, Sports, 5-core) — workhorse for sequential recommendation.
   - **Yoochoose, Diginetica, RetailRocket** — session-based sequential recommendation.
   - **MovieLens 1M** — smaller sibling of the existing MovieLens 20m benchmark, useful for fast iteration and apples-to-apples comparison with prior work.
