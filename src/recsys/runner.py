@@ -12,6 +12,7 @@ import lightning as L
 import torch
 import yaml
 
+from recsys.algorithms.base import Algorithm
 from recsys.engine import CTRTask as LightningCTRTask
 from recsys.evaluation import CTREvaluator
 from recsys.evaluation.store import ResultStore, RunResult
@@ -136,10 +137,11 @@ def build_trainer(cfg: dict[str, Any]):
     return trainer
 
 
-# Defaults used when an algorithm config doesn't carry its own
-# optimizer/loss block. The popularity baseline and any other classical
-# one-shot algo never touches these (it trains with max_epochs=0) but
-# Lightning still wants a valid optimizer to wire up.
+# Defaults used when a torch algorithm config doesn't carry its own
+# optimizer/loss block. Classical algos (anything subclassing
+# :class:`Algorithm` directly) never touch these — they go through the
+# framework-agnostic bypass branch in :func:`run_experiment` and call
+# ``algo.fit`` without any Lightning machinery.
 _DEFAULT_OPTIMIZER = {"name": "adamw", "lr": 0.001}
 _DEFAULT_LOSS = {"name": "binary_cross_entropy_with_logits"}
 
@@ -203,45 +205,10 @@ def run_experiment(
 
     algo_build_cfg = dict(algo_cfg)
     # optimizer/loss live under the algo cfg as a convenience for the
-    # compat shim; they're not algorithm constructor kwargs.
+    # torch path; they're not algorithm constructor kwargs.
     opt_override = algo_build_cfg.pop("optimizer", None)
     loss_override = algo_build_cfg.pop("loss", None)
     algo = ALGO_REGISTRY.build(algo_build_cfg, feature_map=data.feature_map)
-
-    # Classical one-shot hook (popularity-style): fit once on the train
-    # dataset before handing off to Lightning.
-    fit_hook = getattr(algo, "fit_on_train_counts", None)
-    if callable(fit_hook):
-        LOGGER.info("run_experiment: running fit_on_train_counts (classical)")
-        fit_hook(data.train)
-
-    # Wrap in a Lightning task so the trainer.fit path works unchanged
-    # for torch models; for classical algos this is still called (with
-    # max_epochs=0 from the caller) and is a no-op.
-    optimizer_cfg = {**_DEFAULT_OPTIMIZER, **(opt_override or {})}
-    optimizer_cls = OPTIMIZER_REGISTRY.get(optimizer_cfg.pop("name"))
-    loss_cfg = {**_DEFAULT_LOSS, **(loss_override or {})}
-    loss_fn = LOSS_REGISTRY.get(loss_cfg["name"])
-    lightning_task = LightningCTRTask(
-        model=algo,
-        optimizer_cls=optimizer_cls,
-        optimizer_params=optimizer_cfg,
-        loss_fn=loss_fn,
-    )
-
-    trainer_cfg: dict[str, Any] = {"max_epochs": 1}
-    if trainer_overrides:
-        trainer_cfg.update(trainer_overrides)
-    trainer = L.Trainer(**trainer_cfg)
-
-    LOGGER.info("run_experiment: starting trainer.fit")
-    trainer.fit(lightning_task, datamodule=data.datamodule)
-
-    device = getattr(trainer.strategy, "root_device", None)
-    if device is None:
-        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    lightning_task.eval()
-    lightning_task.model.to(device)
 
     # In smoke mode (any limit_val_batches set) cap the ranking-metric
     # user loop so the gate stays cheap.
@@ -249,8 +216,47 @@ def run_experiment(
     if trainer_overrides and trainer_overrides.get("limit_val_batches") is not None:
         max_users_override = 200
 
+    # Classical bypass: algorithms that subclass the framework-agnostic
+    # :class:`Algorithm` protocol directly (i.e. not an ``nn.Module``)
+    # are fit via ``algo.fit(train, val)`` and handed straight to the
+    # task evaluator — no Lightning wrapper, no Trainer.fit, no shim
+    # optimizer. The torch path below is untouched for DeepFM/DIN.
+    if isinstance(algo, Algorithm):
+        LOGGER.info(
+            "run_experiment: classical bypass — calling %s.fit directly",
+            algo.__class__.__name__,
+        )
+        algo.fit(data.train, data.val)
+        eval_target: Any = algo
+    else:
+        optimizer_cfg = {**_DEFAULT_OPTIMIZER, **(opt_override or {})}
+        optimizer_cls = OPTIMIZER_REGISTRY.get(optimizer_cfg.pop("name"))
+        loss_cfg = {**_DEFAULT_LOSS, **(loss_override or {})}
+        loss_fn = LOSS_REGISTRY.get(loss_cfg["name"])
+        lightning_task = LightningCTRTask(
+            model=algo,
+            optimizer_cls=optimizer_cls,
+            optimizer_params=optimizer_cfg,
+            loss_fn=loss_fn,
+        )
+
+        trainer_cfg: dict[str, Any] = {"max_epochs": 1}
+        if trainer_overrides:
+            trainer_cfg.update(trainer_overrides)
+        trainer = L.Trainer(**trainer_cfg)
+
+        LOGGER.info("run_experiment: starting trainer.fit")
+        trainer.fit(lightning_task, datamodule=data.datamodule)
+
+        device = getattr(trainer.strategy, "root_device", None)
+        if device is None:
+            device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        lightning_task.eval()
+        lightning_task.model.to(device)
+        eval_target = lightning_task
+
     metrics = benchmark.task.evaluate(
-        algo=lightning_task,
+        algo=eval_target,
         benchmark_data=data,
         metric_names=benchmark.metric_names,
         max_users_override=max_users_override,

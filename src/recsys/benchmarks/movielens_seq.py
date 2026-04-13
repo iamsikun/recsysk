@@ -21,9 +21,18 @@ class MovieLensSeqBenchmark(Benchmark):
     Same pinned metric list as :class:`MovieLensCTRBenchmark`, but the
     datamodule is built with ``model_input: sequence`` so that dict-valued
     batches (``{item_id, hist_item_id, ...}``) flow to sequence-aware
-    algorithms like DIN. Wave 3 limitation: the ranking slice of the
-    metric dict is NaN for dict-batch algos — see
-    :class:`recsys.evaluation.evaluator.CTREvaluator.evaluate_full`.
+    algorithms like DIN.
+
+    Ranking-metric protocol: sampled-K negatives per positive event.
+    :class:`recsys.evaluation.evaluator.CTREvaluator.evaluate_full` takes
+    the first positive dict-row per user, samples ``eval.n_negatives``
+    items the user hasn't interacted with from the item vocabulary, and
+    scores them against the positive target by stacking the row's
+    history/user-context tensors and varying only the target ``item_id``
+    column. ``user_id`` is read from ``sparse_features`` using the algo's
+    ``sparse_feature_names`` list; the benchmark therefore requires
+    ``user_id`` to appear in ``sparse_feature_names`` for the ranking
+    path to group by user.
     """
 
     name = "movielens_seq"

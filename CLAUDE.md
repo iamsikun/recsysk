@@ -34,24 +34,23 @@ Single pipeline used by the CLI and any higher-level tooling. Given `(algo_cfg, 
 
 1. Builds the benchmark via `BENCHMARK_REGISTRY` and calls `benchmark.build()` to get a `BenchmarkData`.
 2. Builds the algo via `ALGO_REGISTRY.build(algo_cfg, feature_map=data.feature_map)`.
-3. Classical one-shot fit: if the algo exposes a `fit_on_train_counts(train)` hook, it is called once before any Lightning work.
-4. Wraps the algo in `recsys.engine.CTRTask` (a LightningModule) and calls `L.Trainer(**cfg).fit(...)`. For classical algos the caller sets `max_epochs: 0` so the trainer run is a no-op.
-5. Evaluates via `benchmark.task.evaluate(algo=lightning_task, benchmark_data=data, metric_names=benchmark.metric_names, ...)`.
+3. **Classical bypass branch.** If `isinstance(algo, Algorithm)` (i.e. it is a framework-agnostic classical algo, not an `nn.Module`), the runner calls `algo.fit(train, val)` directly and uses the raw algo as the eval target. No Lightning wrapper, no `Trainer.fit`, no shim optimizer.
+4. **Torch branch.** Otherwise (DeepFM, DIN — both `nn.Module` subclasses), the runner wraps the algo in `recsys.engine.CTRTask` and calls `L.Trainer(**cfg).fit(...)` against the benchmark's datamodule.
+5. Evaluates via `benchmark.task.evaluate(algo=eval_target, benchmark_data=data, metric_names=benchmark.metric_names, ...)`.
 6. Writes a `RunResult(benchmark, benchmark_version, algo, algo_config_hash, seed, metrics, runtime_s, timestamp, code_sha, env_fingerprint)` row to `results/<benchmark>.parquet`.
 
 ### Algorithm protocol (`src/recsys/algorithms/base.py`)
 
 Framework-agnostic. The module does not import torch. Subclasses declare `supported_tasks: set[TaskType]` and `required_roles: set[str]` and implement `fit`; `predict_scores` / `predict_topk` / `save` / `load` default to `NotImplementedError` so algos only implement the surface their task needs.
 
-- **Classical** algos live under `src/recsys/algorithms/classical/` (e.g. `popularity.py`). They must not import torch at module scope.
-- **Torch** algos live under `src/recsys/algorithms/torch/` and share a `TorchAlgorithm` base (`torch/base.py`). `deepfm.py` and `din.py` both use it.
-- **Known limitation (Wave 2 workaround).** The runner still routes everything through a Lightning `CTRTask` wrapper, so popularity currently carries an `nn.Module` shim even though it is classical. The true framework-agnostic fit path — where classical algos bypass Lightning entirely — is a known follow-up and is tracked in `docs/dev.md`.
+- **Classical** algos live under `src/recsys/algorithms/classical/` (e.g. `popularity.py`) and inherit directly from `Algorithm`. They must not import torch at module scope (method-body imports are fine for tensor IO). The runner routes them through the classical bypass branch — Lightning is never instantiated.
+- **Torch** algos live under `src/recsys/algorithms/torch/` (`deepfm.py`, `din.py`). They are plain `nn.Module` subclasses; the runner wraps them in `engine.CTRTask` and goes through `L.Trainer.fit`.
 
 ### Benchmark protocol (`src/recsys/benchmarks/base.py`)
 
 Each benchmark pins its own task, split, eval protocol, and metric set. `metric_names` is a class attribute on the benchmark — **not a config key**. Config-tweakable metrics or splits would make benchmark comparisons meaningless. A user who wants different metrics or a different split should create a new benchmark class, not edit a YAML.
 
-v1 ships `movielens_ctr.py` (CTR task, `CTRTask` eval, AUC/LogLoss + ranking metrics) and `movielens_seq.py` (sequential task, DIN target).
+Built-in v1+ benchmarks: `movielens_ctr` (CTR task, DeepFM target), `movielens_seq` (sequential task, DIN target), `kuairec_ctr` (KuaiRec ``small_matrix``, watch-ratio threshold label), `kuairand_ctr` (KuaiRand standard logs, ``is_click`` label, defaults to the ``Pure`` variant). All four bind to `CTRTask` and produce AUC/LogLoss + sampled-100 ranking metrics. Sequential ranking metrics now work for dict-batch algos (DIN) too — the evaluator unwraps `torch.utils.data.Subset` and stacks per-user candidates against the held-out positive.
 
 ### Feature roles (`src/recsys/schemas/features.py`)
 
@@ -61,9 +60,11 @@ v1 ships `movielens_ctr.py` (CTR task, `CTRTask` eval, AUC/LogLoss + ranking met
 
 Parquet, one file per benchmark under `results/`. Rows are keyed by `(benchmark, algo, config_hash, seed, timestamp)`. `config_hash` is `hashlib.sha256(json.dumps(cfg, sort_keys=True))[:12]` via `recsys.utils.config_hash`. `code_sha` is a best-effort `git rev-parse HEAD` captured at run time. `recsys.evaluation.reporting.summary_table(store, benchmark)` produces the mean +/- std table used by `recsys report`.
 
-### Known metric limitation
+### Datasets and loaders
 
-Ranking metrics (NDCG, Recall, HR, MRR) are NaN for dict-batch (sequential) algos like DIN — the v1 ranking evaluator walks tabular batches and does not yet reconstruct per-user candidate lists for sequence inputs. CTR metrics (AUC, LogLoss) work for **all** algos, including DIN. Don't be surprised by NaN ranking rows in `results/movielens_seq.parquet`; that is expected in v1.
+- **MovieLens 20m** lives at `./datasets/ml-20m/`. v1 does not auto-download.
+- **KuaiRec** and **KuaiRand** loaders live at `src/recsys/data/kuairec.py` and `kuairand.py`. Both expose `load(...)` and `download(...)` with `dataset_root=None` defaulting to the repo-root `datasets/` directory (resolved via `Path(__file__).resolve().parents[3]`, so it works regardless of CWD). On first call, missing data is downloaded from Zenodo and extracted; subsequent calls hit the cache. The download performs an atomic `.part`→final rename and verifies `Content-Length` before renaming, so a truncated transfer never produces a "valid-looking" archive.
+- KuaiRand has multiple `log_standard_*.csv` shards (different date ranges); the loader concatenates them into a single DataFrame.
 
 ## Side-effect registration gotcha
 

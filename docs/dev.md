@@ -26,7 +26,6 @@ This document is the concrete, step-by-step plan for restructuring `recsys` into
 
 Write these down so we don't lose them:
 
-- **Simulation-based benchmarks.** The `recsys/simulation/addict_fatigue.py` DGP is left as-is in v1. v2 will wire it as a first-class benchmark for counterfactual/online policy evaluation. This is considered important for modern recsys given the growth of generative recommendation and RL-style policies, and is a v2 priority, not a "maybe."
 - **Task types:** session-based recommendation, conversational recommendation, cold-start (user-cold and item-cold) evaluation.
 - **Beyond-accuracy metrics:** coverage, diversity, novelty, fairness.
 - **Experiment tracking integrations:** MLflow, W&B, TensorBoard hooks.
@@ -326,7 +325,6 @@ A user, starting from a clean clone with MovieLens already under `./datasets`, c
 
 ## v2 roadmap (write-down, not commitment)
 
-- **Simulation-based benchmarks.** Wire `recsys/simulation/addict_fatigue.py` (and future DGPs) as first-class benchmarks supporting online interaction, counterfactual evaluation, and policy-style algorithms. Task API will need extension: current `Task.evaluate` assumes a static dataset; simulator benchmarks need an environment-loop variant. This is a v2 priority, not a stretch goal — generative and RL-style recommenders increasingly need offline-simulator evaluation.
 - **Additional task types:** session-based recommendation, conversational recommendation, cold-start (user-cold and item-cold) evaluation.
 - **Beyond-accuracy metrics:** coverage, diversity, novelty, fairness.
 - **Statistical significance testing** between algos on the same benchmark (paired bootstrap, corrected t-tests).
@@ -336,4 +334,14 @@ A user, starting from a clean clone with MovieLens already under `./datasets`, c
 - **Dataset auto-download + version pinning.** Hash-addressed preprocessed artifacts cached under `~/.cache/recsys/` so re-runs don't repeat the 20M-row preprocessing.
 - **More classical baselines:** item-KNN, BPR-MF, ALS.
 - **More neural baselines:** SASRec, BERT4Rec, NeuMF.
-- **KuaiRec / KuaiRand benchmarks.** The loader stubs exist; promote them to full benchmarks once the v1 abstractions are proven on MovieLens.
+- **More benchmarks.** Broaden coverage beyond MovieLens. Status:
+  - **KuaiRec / KuaiRand** — *landed in v2.0.* Loaders at `src/recsys/data/{kuairec,kuairand}.py` (download-or-load-from-local, default to repo-root `datasets/`). Benchmarks: `kuairec_ctr` (small_matrix, `watch_ratio >= 2.0` label) and `kuairand_ctr` (KuaiRand-Pure standard logs, `is_click` label).
+  - **Amazon Reviews** (Books, Beauty, Electronics, Sports, 5-core) — workhorse for sequential recommendation.
+  - **Yoochoose, Diginetica, RetailRocket** — session-based sequential recommendation.
+  - **MovieLens 1M** — smaller sibling of the existing MovieLens 20m benchmark, useful for fast iteration and apples-to-apples comparison with prior work.
+  - **Netflix Prize** — classic rating-prediction benchmark.
+  - **Yelp** — local/business recommendation.
+  - **Last.fm** — music recommendation.
+  - **Criteo / Avazu** — large-scale CTR-style ranking benchmarks (only if ad recommendation is in scope).
+- ~~**Framework-agnostic fit path for classical algos.**~~ *Landed in v2.0.* The runner now branches on `isinstance(algo, Algorithm)`; classical algos like `popularity` skip Lightning entirely and have their `fit` called directly. `Popularity` no longer subclasses `nn.Module`.
+- ~~**Ranking metrics for sequential / dict-batch algos.**~~ *Landed in v2.0.* `CTREvaluator.evaluate_full` now has a `_dict_batch_ranking` path that unwraps `torch.utils.data.Subset`, takes the first positive row per user, and scores it against sampled-K negatives by stacking the row's history/sparse/dense tensors. NDCG/Recall/HR/MRR work for DIN today.

@@ -1,5 +1,5 @@
-name: popularity_on_movielens_ctr
-benchmark: conf/benchmarks/movielens_ctr.yaml
+name: popularity_on_kuairec_ctr
+benchmark: conf/benchmarks/kuairec_ctr.yaml
 algo: conf/algorithms/popularity.yaml
 seeds: [1, 2, 3]
 # Popularity is a classical algorithm: the runner bypasses Lightning

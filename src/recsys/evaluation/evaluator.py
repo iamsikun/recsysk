@@ -3,13 +3,15 @@
 Iterates a validation/test dataloader, runs the model's forward pass to
 obtain logits, applies sigmoid, and reports AUC + LogLoss on the collected
 predictions. Phase 5 adds :meth:`CTREvaluator.evaluate_full` which extends
-the CTR set with sampled-100 negative ranking metrics.
+the CTR set with sampled-100 negative ranking metrics — both for tabular
+CTR algos (DeepFM on movielens_ctr) and dict-batch sequential algos (DIN
+on movielens_seq).
 """
 
 from __future__ import annotations
 
 import logging
-from typing import Iterable
+from typing import Any, Iterable
 
 import numpy as np
 import torch
@@ -28,9 +30,6 @@ _METRIC_FNS = {
 
 # Max users evaluated for ranking metrics in smoke mode.
 _SMOKE_MAX_USERS = 200
-
-# Emit the dict-batch ranking warning only once per process.
-_DICT_BATCH_WARNED = False
 
 
 class CTREvaluator:
@@ -117,16 +116,26 @@ class CTREvaluator:
         ``ndcg@50``, ``recall@10``, ``recall@50``, ``hr@10``, ``hr@50``,
         ``mrr``.
 
-        Ranking metrics use the sampled-100 negatives protocol: for each
+        Ranking metrics use the sampled-K negatives protocol: for each
         evaluated positive interaction, sample ``n_negatives`` items the
         user hasn't seen in the val set and rank them against the held-out
         positive. The evaluation is capped at ``max_users`` users (default
         ``None`` == all) to keep the smoke gate cheap.
 
-        For dict-batch algorithms (e.g. DIN sequential) the ranking step
-        cannot easily synthesise a fake batch without access to the
-        history column, so those metrics are returned as NaN and a warning
-        is emitted once per process.
+        Two input shapes are supported:
+
+        * Tabular CTR (e.g. DeepFM on ``movielens_ctr``). Each val_dataset
+          row is ``(tensor, label)`` where ``tensor`` is a 1-D feature
+          vector indexed by ``feature_map`` insertion order. Candidates
+          are scored by cloning the row and mutating the ``item_id``
+          column.
+        * Dict-batch sequential (e.g. DIN on ``movielens_seq``). Each row
+          is ``({item_id, hist_item_id, hist_item_id_mask, sparse_features,
+          dense_features?}, label)``. Candidates are scored by stacking
+          the same history/user-context tensors and varying the target
+          ``item_id`` tensor. The user identity is read from
+          ``sparse_features[sparse_feature_names.index("user_id")]`` on
+          the underlying algo module.
         """
         if device is None:
             device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -148,11 +157,11 @@ class CTREvaluator:
             "mrr",
         ]
 
-        # Pre-seed result with NaNs so we always return all keys.
         result: dict[str, float] = {
             "auc": float(ctr_metrics.get("auc", float("nan"))),
             "logloss": float(ctr_metrics.get("logloss", float("nan"))),
         }
+        # Pre-seed ranking keys; the branches below overwrite them.
         for k in ranking_keys:
             result[k] = float("nan")
 
@@ -164,27 +173,15 @@ class CTREvaluator:
             )
             return result
 
-        # Column indices: rely on dict insertion order used everywhere in
-        # the codebase (see Popularity.__init__ for the same assumption).
-        feature_names = list(feature_map.keys())
-        if "user_id" not in feature_names or "item_id" not in feature_names:
+        if "item_id" not in feature_map:
             LOGGER.warning(
-                "evaluate_full: feature_map missing user_id or item_id; "
-                "skipping ranking metrics. keys=%s",
-                feature_names,
+                "evaluate_full: feature_map missing item_id; skipping ranking metrics"
             )
             return result
-        user_col = feature_names.index("user_id")
-        item_col = feature_names.index("item_id")
         n_items = int(feature_map["item_id"])
 
-        # ---- Probe one row to detect dict-batch limitation. ----
-        try:
-            first = val_dataset[0]
-        except Exception as exc:  # noqa: BLE001
-            LOGGER.warning("evaluate_full: val_dataset indexing failed: %s", exc)
-            return result
-
+        # ---- Probe one row to pick the right ranking path. ----
+        first = val_dataset[0]
         if not isinstance(first, (tuple, list)) or len(first) < 2:
             LOGGER.warning(
                 "evaluate_full: val_dataset rows must be (x, y); got %s",
@@ -193,19 +190,33 @@ class CTREvaluator:
             return result
 
         sample_x = first[0]
-        if not isinstance(sample_x, torch.Tensor):
-            # Dict-batch path (DIN sequential) — synthesising a fake batch
-            # for sampled-100 ranking would require fabricating history
-            # columns. Wave 3 leaves this NaN and documents the limitation.
-            global _DICT_BATCH_WARNED
-            if not _DICT_BATCH_WARNED:
-                LOGGER.warning(
-                    "evaluate_full: dict-batch inputs (e.g. DIN sequential) "
-                    "not supported for ranking metrics; returning NaN. "
-                    "This limitation is tracked as a follow-up."
-                )
-                _DICT_BATCH_WARNED = True
+        sampler = negative_sampler if negative_sampler is not None else RandomUniform()
+
+        if isinstance(sample_x, dict):
+            ranking_metrics = self._dict_batch_ranking(
+                model=model,
+                val_dataset=val_dataset,
+                n_items=n_items,
+                n_negatives=n_negatives,
+                seed=seed,
+                max_users=max_users,
+                device=device,
+                sampler=sampler,
+            )
+            result.update(ranking_metrics)
             return result
+
+        # ---- Tabular ranking path. ----
+        feature_names = list(feature_map.keys())
+        if "user_id" not in feature_names:
+            LOGGER.warning(
+                "evaluate_full: feature_map missing user_id; "
+                "skipping tabular ranking metrics. keys=%s",
+                feature_names,
+            )
+            return result
+        user_col = feature_names.index("user_id")
+        item_col = feature_names.index("item_id")
 
         # ---- Build user -> positive items, user -> all interacted items. ----
         user_positives: dict[int, list[tuple[int, torch.Tensor]]] = {}
@@ -242,15 +253,10 @@ class CTREvaluator:
 
         rng = np.random.default_rng(seed)
 
-        # Wave 4 (P6): negative sampling extracted into
-        # ``recsys.data.negatives.random_uniform.RandomUniform``. The
-        # evaluator now receives the sampler via ``negative_sampler``
-        # (forwarded by :class:`recsys.tasks.ctr.CTRTask.evaluate` from
-        # ``benchmark_data.metadata["negative_sampler"]``). When no
-        # sampler is supplied we fall back to a fresh ``RandomUniform``
-        # instance so the legacy compat path keeps working byte-for-byte.
-        sampler = negative_sampler if negative_sampler is not None else RandomUniform()
-
+        # Negative sampling is driven by the extracted
+        # ``recsys.data.negatives.random_uniform.RandomUniform`` (or any
+        # sampler the benchmark forwards via ``negative_sampler``). The
+        # ``sampler`` variable was bound earlier in the common preamble.
         per_user_gt: list[list[int]] = []
         per_user_preds: list[list[int]] = []
 
@@ -293,7 +299,7 @@ class CTREvaluator:
                     scores = logits.detach().float().cpu().numpy().reshape(-1)
                     # Argsort descending.
                     order = np.argsort(-scores)
-                    ranked = [int(item_ids[i]) for i in order]
+                    ranked = [int(item_ids[k]) for k in order]
                     per_user_gt.append([int(pos_it)])
                     per_user_preds.append(ranked)
         finally:
@@ -304,18 +310,211 @@ class CTREvaluator:
             LOGGER.warning("evaluate_full: ranking loop produced no users")
             return result
 
-        try:
-            result["ndcg@10"] = float(ndcg_at_k(per_user_gt, per_user_preds, 10))
-            result["ndcg@50"] = float(ndcg_at_k(per_user_gt, per_user_preds, 50))
-            result["recall@10"] = float(recall_at_k(per_user_gt, per_user_preds, 10))
-            result["recall@50"] = float(recall_at_k(per_user_gt, per_user_preds, 50))
-            result["hr@10"] = float(hr_at_k(per_user_gt, per_user_preds, 10))
-            result["hr@50"] = float(hr_at_k(per_user_gt, per_user_preds, 50))
-            result["mrr"] = float(mrr(per_user_gt, per_user_preds))
-        except Exception as exc:  # noqa: BLE001
-            LOGGER.warning("evaluate_full: ranking metric computation failed: %s", exc)
-
+        result.update(_compute_ranking_metrics(per_user_gt, per_user_preds))
         return result
+
+    def _dict_batch_ranking(
+        self,
+        model: torch.nn.Module,
+        val_dataset: Any,
+        n_items: int,
+        n_negatives: int,
+        seed: int,
+        max_users: int | None,
+        device: torch.device,
+        sampler: Any,
+    ) -> dict[str, float]:
+        """Sampled-K ranking evaluation for dict-batch sequential models.
+
+        For each user with a positive row in ``val_dataset``, take the
+        first such row (= the earliest positive event under that user's
+        history-prefix schedule), sample ``n_negatives`` item IDs the user
+        hasn't seen, then score the positive target against the negatives
+        by stacking the row's history/user-context tensors ``K+1`` times
+        and varying only the target ``item_id`` column. The ranked item
+        list feeds the same ranking metric functions the tabular path
+        uses. Returns a dict with keys ``ndcg@10``, ``ndcg@50``,
+        ``recall@10``, ``recall@50``, ``hr@10``, ``hr@50``, ``mrr``.
+
+        The user identity comes from
+        ``sparse_features[sparse_feature_names.index("user_id")]`` on the
+        wrapped algo module. If that layout is missing we fall back to
+        giving each row its own singleton user, which yields a strictly
+        per-event ranking (still a valid sampled-K protocol).
+        """
+        item_feature = getattr(model, "item_feature", "item_id")
+        sparse_feature_names: list[str] = list(
+            getattr(model, "sparse_feature_names", []) or []
+        )
+        user_sparse_idx = (
+            sparse_feature_names.index("user_id")
+            if "user_id" in sparse_feature_names
+            else None
+        )
+
+        # ---- Bulk-read the dataset tensors. ----
+        # SequenceDataset stores ``features: dict[str, Tensor]`` (each tensor
+        # has shape (N, ...)) and ``labels: Tensor`` of shape (N, 1) or (N,).
+        # The MovieLens builder wraps the SequenceDataset in
+        # ``torch.utils.data.Subset`` via ``random_split``; unwrap to reach the
+        # bulk tensors and remember the row indices into them.
+        from torch.utils.data import Subset
+
+        if isinstance(val_dataset, Subset):
+            base_dataset = val_dataset.dataset
+            row_indices = np.asarray(val_dataset.indices, dtype=np.int64)
+        else:
+            base_dataset = val_dataset
+            row_indices = None
+
+        features = getattr(base_dataset, "features", None)
+        labels = getattr(base_dataset, "labels", None)
+        if not isinstance(features, dict) or labels is None:
+            LOGGER.warning(
+                "evaluate_full: dict-batch val_dataset does not expose "
+                "`features`/`labels`; cannot compute ranking metrics"
+            )
+            return {}
+        if item_feature not in features:
+            LOGGER.warning(
+                "evaluate_full: dict-batch val_dataset missing target feature "
+                "%s; available keys=%s",
+                item_feature,
+                sorted(features.keys()),
+            )
+            return {}
+
+        item_col_full = features[item_feature].detach().cpu().numpy().reshape(-1)
+        labels_full = labels.detach().cpu().numpy().reshape(-1)
+        if row_indices is not None:
+            item_col = item_col_full[row_indices]
+            labels_arr = labels_full[row_indices]
+        else:
+            item_col = item_col_full
+            labels_arr = labels_full
+            row_indices = np.arange(len(item_col), dtype=np.int64)
+        n_rows = len(item_col)
+
+        if user_sparse_idx is not None and "sparse_features" in features:
+            user_col_full = (
+                features["sparse_features"][:, user_sparse_idx]
+                .detach()
+                .cpu()
+                .numpy()
+                .reshape(-1)
+            )
+            user_col = user_col_full[row_indices]
+        else:
+            # Degenerate fallback: each row is its own user. Valid
+            # per-event ranking, just coarser aggregation.
+            user_col = np.arange(n_rows, dtype=np.int64)
+
+        # First positive row index per user, plus union of interacted
+        # items per user (for negative-sampling exclusion).
+        user_positive_idx: dict[int, int] = {}
+        user_interacted: dict[int, set[int]] = {}
+        for i in range(n_rows):
+            u = int(user_col[i])
+            it = int(item_col[i])
+            bucket = user_interacted.setdefault(u, set())
+            bucket.add(it)
+            if labels_arr[i] > 0.0 and u not in user_positive_idx:
+                user_positive_idx[u] = i
+
+        eligible_users = sorted(user_positive_idx.keys())
+        if not eligible_users:
+            LOGGER.warning(
+                "evaluate_full: no positive dict-batch rows found in val_dataset"
+            )
+            return {}
+        if max_users is not None and len(eligible_users) > int(max_users):
+            eligible_users = eligible_users[: int(max_users)]
+
+        rng = np.random.default_rng(seed)
+
+        per_user_gt: list[list[int]] = []
+        per_user_preds: list[list[int]] = []
+
+        was_training = model.training
+        model.eval()
+        try:
+            with torch.no_grad():
+                for u in eligible_users:
+                    subset_i = user_positive_idx[u]
+                    base_row_idx = int(row_indices[subset_i])
+                    pos_it = int(item_col[subset_i])
+                    interacted = user_interacted.get(u, set())
+                    exclude = interacted | {pos_it}
+                    negatives_arr = sampler.sample(
+                        n_negatives=n_negatives,
+                        exclude=exclude,
+                        vocab_size=n_items,
+                        rng=rng,
+                    )
+                    negatives = [int(x) for x in negatives_arr.tolist()]
+                    if not negatives:
+                        continue
+                    item_ids = [pos_it, *negatives]
+                    candidate_batch_size = len(item_ids)
+
+                    # Stack the positive row's tensors K+1 times, then
+                    # overwrite the target item column with the candidate
+                    # IDs. Everything else (history, sparse, dense) is
+                    # shared across the candidates, which is exactly the
+                    # standard sampled-ranking protocol for a
+                    # history-aware CTR scorer.
+                    batch: dict[str, torch.Tensor] = {}
+                    for key, tensor in features.items():
+                        row_tensor = tensor[base_row_idx]
+                        stacked = (
+                            row_tensor.unsqueeze(0)
+                            .expand(candidate_batch_size, *row_tensor.shape)
+                            .contiguous()
+                            .to(device)
+                        )
+                        batch[key] = stacked
+
+                    target_key = item_feature if item_feature in batch else "target_item"
+                    target_tensor = torch.tensor(
+                        item_ids,
+                        dtype=batch[target_key].dtype,
+                        device=device,
+                    )
+                    batch[target_key] = target_tensor
+
+                    logits = model(batch)
+                    scores = logits.detach().float().cpu().numpy().reshape(-1)
+                    order = np.argsort(-scores)
+                    ranked = [int(item_ids[k]) for k in order]
+                    per_user_gt.append([int(pos_it)])
+                    per_user_preds.append(ranked)
+        finally:
+            if was_training:
+                model.train()
+
+        if not per_user_gt:
+            LOGGER.warning(
+                "evaluate_full: dict-batch ranking loop produced no users"
+            )
+            return {}
+
+        return _compute_ranking_metrics(per_user_gt, per_user_preds)
+
+
+def _compute_ranking_metrics(
+    per_user_gt: list[list[int]],
+    per_user_preds: list[list[int]],
+) -> dict[str, float]:
+    """Shared metric computation used by both tabular and dict-batch paths."""
+    return {
+        "ndcg@10": float(ndcg_at_k(per_user_gt, per_user_preds, 10)),
+        "ndcg@50": float(ndcg_at_k(per_user_gt, per_user_preds, 50)),
+        "recall@10": float(recall_at_k(per_user_gt, per_user_preds, 10)),
+        "recall@50": float(recall_at_k(per_user_gt, per_user_preds, 50)),
+        "hr@10": float(hr_at_k(per_user_gt, per_user_preds, 10)),
+        "hr@50": float(hr_at_k(per_user_gt, per_user_preds, 50)),
+        "mrr": float(mrr(per_user_gt, per_user_preds)),
+    }
 
 
 def _to_device(x, device: torch.device):

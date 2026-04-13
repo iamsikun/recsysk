@@ -69,13 +69,13 @@ Metrics and splits are **pinned by the benchmark class**, not by config. If you 
 
 **Runtime flow.** `recsys bench` loads an experiment YAML and calls `recsys.runner.run_experiment(algo_cfg, benchmark_cfg, seed, trainer_overrides, results_dir, store)`. That function builds the benchmark, builds the algo, runs the classical one-shot fit hook (if present) and/or the Lightning `Trainer.fit`, hands the fitted algo to `benchmark.task.evaluate(...)`, and writes a `RunResult` row to `results/<benchmark>.parquet`. `recsys report` reads the same parquet and prints a mean +/- std table across seeds.
 
-## v1 scope
+## Scope (v1 + landed v2.0 work)
 
-- **Benchmarks:** `movielens_ctr`, `movielens_seq`.
-- **Algorithms:** `deepfm` (CTR), `din` (sequential), `popularity` (classical baseline).
-- **Metrics:** AUC, LogLoss for CTR; NDCG@{10,50}, Recall@{10,50}, HR@{10,50}, MRR for ranking.
+- **Benchmarks:** `movielens_ctr`, `movielens_seq`, `kuairec_ctr`, `kuairand_ctr`. KuaiRec/KuaiRand loaders auto-download the archives from Zenodo to `./datasets/` on first use; subsequent runs hit the cache.
+- **Algorithms:** `deepfm` (CTR), `din` (sequential, with working ranking metrics), `popularity` (classical baseline — bypasses Lightning entirely via the framework-agnostic fit path).
+- **Metrics:** AUC, LogLoss for CTR; NDCG@{10,50}, Recall@{10,50}, HR@{10,50}, MRR for ranking. Ranking metrics now compute correctly for sequential dict-batch algos like DIN.
 - **Infrastructure:** parquet result store keyed by `(benchmark, algo, config_hash, seed, timestamp)`, argparse CLI (`bench`, `report`, `list`), multi-seed runs as the default.
 
 ## Deferred to v2
 
-Simulator-based benchmarks (the `recsys/simulation/addict_fatigue.py` DGP is a v2 priority), session / conversational / cold-start tasks, beyond-accuracy metrics (coverage, diversity, novelty, fairness), statistical significance tests, experiment-tracker hooks (MLflow / W&B), hyperparameter sweeps, dataset auto-download, a typer-based CLI, and additional classical / neural baselines (item-KNN, BPR-MF, SASRec, BERT4Rec, ...). See `docs/dev.md` for the full v1 plan and v2 roadmap.
+Session / conversational / cold-start tasks, beyond-accuracy metrics (coverage, diversity, novelty, fairness), statistical significance tests, experiment-tracker hooks (MLflow / W&B), hyperparameter sweeps, a typer-based CLI, additional classical / neural baselines (item-KNN, BPR-MF, SASRec, BERT4Rec, ...), and additional benchmarks (Amazon Reviews, Yoochoose / Diginetica / RetailRocket, MovieLens 1M, Netflix Prize, Yelp, Last.fm, Criteo / Avazu). See `docs/dev.md` for the full v1 plan and v2 roadmap.
