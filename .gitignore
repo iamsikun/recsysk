@@ -4,6 +4,12 @@ datasets/
 datasets
 lightning_logs/
 
+# macOS metadata
+.DS_Store
+
+# Local tooling
+.claude/
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[cod]
