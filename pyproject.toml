@@ -1,25 +1,46 @@
 [build-system]
-requires = ["setuptools>=61.0", "wheel", "numpy>=2.3.4"]
+requires = ["setuptools>=77", "wheel", "numpy>=2.3.4"]
 build-backend = "setuptools.build_meta"
 
 
 [project]
-name = "recsys"
+name = "recsysk"
 version = "0.1.0"
-description = "Add your description here"
+description = "Framework-agnostic recsys benchmarking harness — pinned benchmarks, pluggable algorithms, reproducible runs."
 readme = "README.md"
-requires-python = ">=3.13"
+requires-python = ">=3.11"
+license = "Apache-2.0"
+license-files = ["LICENSE"]
+authors = [
+    { name = "Sikun Xu", email = "xusikun96@gmail.com" },
+]
+keywords = ["recommender-systems", "benchmark", "ctr", "deep-learning", "pytorch", "lightning"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Science/Research",
+    "Intended Audience :: Developers",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Operating System :: OS Independent",
+]
 dependencies = [
     "huggingface-hub>=0.24",
     "lightning>=2.6.0",
     "matplotlib>=3.10.8",
     "numpy>=2.3.4",
     "pandas>=2.3.3",
-    "pip>=25.3",
     "polars>=1.37.1",
     "scikit-learn>=1.8.0",
     "torch",
 ]
+
+[project.urls]
+Homepage = "https://github.com/iamsikun/recsys"
+Repository = "https://github.com/iamsikun/recsys"
+Issues = "https://github.com/iamsikun/recsys/issues"
 
 # define the CUDA-specific index
 [[tool.uv.index]]
@@ -42,6 +63,9 @@ package-dir = {"" = "src"}
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.setuptools.package-data]
+recsys = ["conf/**/*.yaml"]
 
 [dependency-groups]
 dev = [

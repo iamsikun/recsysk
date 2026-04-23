@@ -50,7 +50,7 @@ Framework-agnostic. The module does not import torch. Subclasses declare `suppor
 
 Each benchmark pins its own task, split, eval protocol, and metric set. `metric_names` is a class attribute on the benchmark — **not a config key**. Config-tweakable metrics or splits would make benchmark comparisons meaningless. A user who wants different metrics or a different split should create a new benchmark class, not edit a YAML.
 
-Built-in v1+ benchmarks: `movielens_ctr` (CTR task, DeepFM target), `movielens_seq` (sequential task, DIN target), `kuairec_ctr` (KuaiRec ``small_matrix``, watch-ratio threshold label), `kuairand_ctr` (KuaiRand standard logs, ``is_click`` label, defaults to the ``Pure`` variant). All four bind to `CTRTask` and produce AUC/LogLoss + sampled-100 ranking metrics. Sequential ranking metrics now work for dict-batch algos (DIN) too — the evaluator unwraps `torch.utils.data.Subset` and stacks per-user candidates against the held-out positive.
+Built-in benchmarks and their pinned task / label / metrics are documented in [docs/models.md](docs/models.md); supported datasets and acquisition details in [docs/datasets.md](docs/datasets.md). All shipped benchmarks bind to `CTRTask` and produce AUC/LogLoss + sampled-100 ranking metrics; sequential ranking works for dict-batch algos (DIN) via the evaluator's `_dict_batch_ranking` path, which unwraps `torch.utils.data.Subset` and scores each user's held-out positive against sampled negatives.
 
 ### Feature roles (`src/recsys/schemas/features.py`)
 
@@ -62,9 +62,14 @@ Parquet, one file per benchmark under `results/`. Rows are keyed by `(benchmark,
 
 ### Datasets and loaders
 
-- **MovieLens 20m** lives at `./datasets/ml-20m/`. v1 does not auto-download.
-- **KuaiRec** and **KuaiRand** loaders live at `src/recsys/data/kuairec.py` and `kuairand.py`. Both expose `load(...)` and `download(...)` with `dataset_root=None` defaulting to the repo-root `datasets/` directory (resolved via `Path(__file__).resolve().parents[3]`, so it works regardless of CWD). On first call, missing data is downloaded from Zenodo and extracted; subsequent calls hit the cache. The download performs an atomic `.part`→final rename and verifies `Content-Length` before renaming, so a truncated transfer never produces a "valid-looking" archive.
-- KuaiRand has multiple `log_standard_*.csv` shards (different date ranges); the loader concatenates them into a single DataFrame.
+Loaders live under `src/recsys/data/<name>.py`. They are framework-agnostic (no torch/Lightning imports), expose `load(...)` and `download(...)` entry points, and default the on-disk cache to the repo-root `datasets/` directory (`Path(__file__).resolve().parents[3] / "datasets"`, so CWD doesn't matter).
+
+Two acquisition helpers cover all current datasets, both in [`src/recsys/data/_download.py`](src/recsys/data/_download.py):
+
+- `http_download_atomic` — streams to disk via a `.part` file, renames atomically on success, and verifies `Content-Length` before rename so a truncated transfer never produces a "valid-looking" archive. Used for Zenodo-backed datasets (KuaiRec, KuaiRand).
+- `fetch_hf_dataset` — wraps `huggingface_hub.snapshot_download` with `repo_type="dataset"`, supports `allow_patterns` to fetch only per-category files. Used for Amazon Reviews 2023.
+
+See [docs/datasets.md](docs/datasets.md) for the current list of datasets, their variants, label definitions, and any acquisition caveats.
 
 ## Side-effect registration gotcha
 

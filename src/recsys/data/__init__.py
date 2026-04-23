@@ -2,3 +2,4 @@
 from recsys.data.datamodules import movielens  # noqa: F401
 from recsys.data.datamodules import kuairec as _kuairec_dm  # noqa: F401
 from recsys.data.datamodules import kuairand as _kuairand_dm  # noqa: F401
+from recsys.data.datamodules import amazon as _amazon_dm  # noqa: F401

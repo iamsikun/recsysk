@@ -30,6 +30,7 @@ class CTRTask(L.LightningModule):
         optimizer_params: dict[str, Any],
         loss_fn: Callable[[torch.Tensor, torch.Tensor], torch.Tensor],
         metrics: list[Callable[[torch.Tensor, torch.Tensor], float]] | None = None,
+        aux_loss_weight: float = 1.0,
     ):
         super().__init__()
         self.model = model
@@ -37,6 +38,7 @@ class CTRTask(L.LightningModule):
         self.optimizer_params = optimizer_params
         self.loss_fn = loss_fn
         self.metrics = metrics or []
+        self.aux_loss_weight = float(aux_loss_weight)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         return self.model(x)
@@ -47,6 +49,15 @@ class CTRTask(L.LightningModule):
         logits = self.model(x)  # (B, 1)
         loss = self.loss_fn(logits, y)
         self.log("train_loss", loss)
+
+        # Opt-in auxiliary-loss hook. A model may set
+        # ``self.last_aux_loss`` as a scalar Tensor inside its forward
+        # pass (e.g. DIEN's next-behavior prediction loss). Non-DIEN
+        # models leave the attribute unset, making this a no-op.
+        aux = getattr(self.model, "last_aux_loss", None)
+        if isinstance(aux, torch.Tensor):
+            self.log("train_aux_loss", aux)
+            loss = loss + self.aux_loss_weight * aux
         return loss
 
     def validation_step(self, batch: tuple[torch.Tensor, torch.Tensor]) -> torch.Tensor:

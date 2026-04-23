@@ -206,10 +206,12 @@ def run_experiment(
     )
 
     algo_build_cfg = dict(algo_cfg)
-    # optimizer/loss live under the algo cfg as a convenience for the
-    # torch path; they're not algorithm constructor kwargs.
+    # optimizer/loss/aux_loss_weight live under the algo cfg as a
+    # convenience for the torch path; they're not algorithm constructor
+    # kwargs.
     opt_override = algo_build_cfg.pop("optimizer", None)
     loss_override = algo_build_cfg.pop("loss", None)
+    aux_loss_weight = float(algo_build_cfg.pop("aux_loss_weight", 1.0))
     algo = ALGO_REGISTRY.build(
         algo_build_cfg,
         feature_map=data.feature_map,
@@ -278,6 +280,7 @@ def run_experiment(
             optimizer_cls=optimizer_cls,
             optimizer_params=optimizer_cfg,
             loss_fn=loss_fn,
+            aux_loss_weight=aux_loss_weight,
         )
 
         trainer_cfg: dict[str, Any] = {"max_epochs": 1}
