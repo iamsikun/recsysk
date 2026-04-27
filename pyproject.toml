@@ -38,9 +38,9 @@ dependencies = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/iamsikun/recsys"
-Repository = "https://github.com/iamsikun/recsys"
-Issues = "https://github.com/iamsikun/recsys/issues"
+Homepage = "https://github.com/iamsikun/recsysk"
+Repository = "https://github.com/iamsikun/recsysk"
+Issues = "https://github.com/iamsikun/recsysk/issues"
 
 # define the CUDA-specific index
 [[tool.uv.index]]
