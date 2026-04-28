@@ -52,7 +52,10 @@ class CTRTask(Task):
         negative_sampler = benchmark_data.metadata.get("negative_sampler")
 
         ctr_metrics_requested = [m for m in metric_names if m in CTR_METRIC_NAMES]
-        evaluator = CTREvaluator(metrics=ctr_metrics_requested or None)
+        evaluator = CTREvaluator(
+            metrics=ctr_metrics_requested or None,
+            feature_map=dict(benchmark_data.feature_map) if benchmark_data.feature_map else None,
+        )
         full = evaluator.evaluate_full(
             model,
             datamodule,
