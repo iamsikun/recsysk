@@ -18,6 +18,7 @@ import torch
 
 from recsys.data.negatives.random_uniform import RandomUniform
 from recsys.metrics.ctr import auc as _auc
+from recsys.metrics.ctr import gauc as _gauc
 from recsys.metrics.ctr import logloss as _logloss
 from recsys.metrics.ctr import ne as _ne
 from recsys.metrics.ranking import hr_at_k, mrr, ndcg_at_k, recall_at_k
@@ -28,7 +29,11 @@ _METRIC_FNS = {
     "auc": _auc,
     "logloss": _logloss,
     "ne": _ne,
+    "gauc": _gauc,
 }
+
+# Metrics that need per-row user_id alongside (y_true, y_score).
+_GROUP_METRIC_NAMES = frozenset({"gauc"})
 
 # Public view of the point-prediction metric names the evaluator knows
 # how to compute via the legacy ``evaluate()`` path. Tasks use this to
@@ -49,7 +54,13 @@ class CTREvaluator:
         entrypoint. Defaults to ``["auc", "logloss"]``.
     """
 
-    def __init__(self, metrics: list[str] | None = None) -> None:
+    def __init__(
+        self,
+        metrics: list[str] | None = None,
+        *,
+        feature_map: dict[str, int] | None = None,
+        user_id_key: str = "user_id",
+    ) -> None:
         self.metrics = list(metrics) if metrics is not None else ["auc", "logloss"]
         unknown = [m for m in self.metrics if m not in _METRIC_FNS]
         if unknown:
@@ -57,6 +68,41 @@ class CTREvaluator:
                 f"Unknown CTR metrics: {unknown}. "
                 f"Supported: {sorted(_METRIC_FNS)}"
             )
+        # ``feature_map`` lets the evaluator pull user_id out of tabular
+        # batches for group metrics (gAUC). For dict batches we read it
+        # by key directly. Both default to ``"user_id"``.
+        self.feature_map = dict(feature_map) if feature_map is not None else None
+        self.user_id_key = user_id_key
+
+    def _extract_user_ids(self, x: Any) -> np.ndarray | None:
+        """Pull a 1-D user_id array out of a batch's input tensor / dict.
+
+        Returns ``None`` when user_id is unavailable in the current shape
+        (e.g. tabular batch but no ``feature_map`` was provided, or the
+        feature_map doesn't include ``user_id``). Group metrics that need
+        user_id treat ``None`` as a soft skip.
+
+        Note: ``feature_map`` is a ``{name: vocab_size}`` dict; the
+        column index of a feature in a tabular batch tensor is its
+        **insertion-order position** in the dict's keys, not the value
+        stored under the key. Mirrors the lookup in :meth:`evaluate_full`.
+        """
+        if isinstance(x, dict):
+            uid = x.get(self.user_id_key)
+            if uid is None:
+                return None
+            return uid.detach().cpu().numpy().reshape(-1)
+        if isinstance(x, torch.Tensor):
+            if self.feature_map is None:
+                return None
+            keys = list(self.feature_map.keys())
+            if self.user_id_key not in keys:
+                return None
+            col = keys.index(self.user_id_key)
+            if col >= x.shape[-1]:
+                return None
+            return x[:, col].detach().cpu().numpy().reshape(-1)
+        return None
 
     def evaluate(
         self,
@@ -68,6 +114,11 @@ class CTREvaluator:
 
         preds: list[np.ndarray] = []
         labels: list[np.ndarray] = []
+        user_ids: list[np.ndarray] = []
+        # Tracks whether every batch so far supplied user_ids. Once one
+        # batch fails to provide them, we drop the column entirely
+        # rather than reporting partial gAUC.
+        user_ids_available = True
 
         was_training = model.training
         model.eval()
@@ -86,6 +137,13 @@ class CTREvaluator:
                     y_np = y.detach().float().cpu().numpy()
                     preds.append(probs.reshape(-1))
                     labels.append(y_np.reshape(-1))
+                    if user_ids_available:
+                        uid = self._extract_user_ids(x)
+                        if uid is None:
+                            user_ids_available = False
+                            user_ids = []
+                        else:
+                            user_ids.append(uid)
         finally:
             if was_training:
                 model.train()
@@ -96,12 +154,27 @@ class CTREvaluator:
 
         y_score = np.concatenate(preds)
         y_true = np.concatenate(labels)
+        user_ids_arr: np.ndarray | None = (
+            np.concatenate(user_ids) if user_ids_available and user_ids else None
+        )
 
         results: dict[str, float] = {}
         for name in self.metrics:
             fn = _METRIC_FNS[name]
             try:
-                results[name] = float(fn(y_true, y_score))
+                if name in _GROUP_METRIC_NAMES:
+                    if user_ids_arr is None:
+                        LOGGER.warning(
+                            "CTREvaluator: %s requires user_id but none was extractable; "
+                            "configure feature_map=%r or include 'user_id' in dict batches.",
+                            name,
+                            self.user_id_key,
+                        )
+                        results[name] = float("nan")
+                    else:
+                        results[name] = float(fn(y_true, y_score, user_ids_arr))
+                else:
+                    results[name] = float(fn(y_true, y_score))
             except Exception as exc:  # noqa: BLE001
                 LOGGER.warning("Failed to compute metric %s: %s", name, exc)
                 results[name] = float("nan")
