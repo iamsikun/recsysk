@@ -1,4 +1,4 @@
-# recsys
+# RecSysK
 
 [![PyPI version](https://img.shields.io/pypi/v/recsysk.svg)](https://pypi.org/project/recsysk/)
 [![Python versions](https://img.shields.io/pypi/pyversions/recsysk.svg)](https://pypi.org/project/recsysk/)
