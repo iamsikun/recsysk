@@ -19,6 +19,7 @@ import torch
 from recsys.data.negatives.random_uniform import RandomUniform
 from recsys.metrics.ctr import auc as _auc
 from recsys.metrics.ctr import logloss as _logloss
+from recsys.metrics.ctr import ne as _ne
 from recsys.metrics.ranking import hr_at_k, mrr, ndcg_at_k, recall_at_k
 
 LOGGER = logging.getLogger(__name__)
@@ -26,7 +27,13 @@ LOGGER = logging.getLogger(__name__)
 _METRIC_FNS = {
     "auc": _auc,
     "logloss": _logloss,
+    "ne": _ne,
 }
+
+# Public view of the point-prediction metric names the evaluator knows
+# how to compute via the legacy ``evaluate()`` path. Tasks use this to
+# split a benchmark's ``metric_names`` into CTR vs ranking subsets.
+CTR_METRIC_NAMES = frozenset(_METRIC_FNS)
 
 # Max users evaluated for ranking metrics in smoke mode.
 _SMOKE_MAX_USERS = 200
@@ -157,13 +164,14 @@ class CTREvaluator:
             "mrr",
         ]
 
-        result: dict[str, float] = {
-            "auc": float(ctr_metrics.get("auc", float("nan"))),
-            "logloss": float(ctr_metrics.get("logloss", float("nan"))),
-        }
-        # Pre-seed ranking keys; the branches below overwrite them.
+        # Forward every CTR metric the legacy ``evaluate()`` produced
+        # (auc, logloss, ne, …). Pre-seed auc/logloss + ranking keys so
+        # downstream filtering by metric_names always finds them.
+        result: dict[str, float] = {name: float(val) for name, val in ctr_metrics.items()}
+        result.setdefault("auc", float("nan"))
+        result.setdefault("logloss", float("nan"))
         for k in ranking_keys:
-            result[k] = float("nan")
+            result.setdefault(k, float("nan"))
 
         val_dataset = getattr(datamodule, "val_dataset", None)
         feature_map: dict[str, int] = getattr(datamodule, "feature_map", {}) or {}

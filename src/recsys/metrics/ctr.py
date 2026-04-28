@@ -44,3 +44,21 @@ def logloss(y_true: np.ndarray, y_score: np.ndarray) -> float:
     eps = 1e-7
     y_score = np.clip(y_score, eps, 1.0 - eps)
     return float(log_loss(y_true, y_score, labels=[0, 1]))
+
+
+def ne(y_true: np.ndarray, y_score: np.ndarray) -> float:
+    """Compute normalized entropy (logloss / entropy of the base rate).
+
+    Standard CTR metric in the unified seq + non-seq line (Wukong, HSTU, etc.):
+    logloss divided by the entropy of a model that always predicts the
+    label mean. NE < 1 means the model beats the constant-base-rate predictor.
+    Returns NaN if the labels are degenerate (all 0s or all 1s).
+    """
+    y_true = np.asarray(y_true).reshape(-1).astype(np.float64)
+    if y_true.size == 0:
+        return float("nan")
+    p = float(y_true.mean())
+    if p <= 0.0 or p >= 1.0:
+        return float("nan")
+    base_entropy = -(p * np.log(p) + (1.0 - p) * np.log(1.0 - p))
+    return float(logloss(y_true, y_score) / base_entropy)
