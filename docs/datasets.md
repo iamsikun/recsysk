@@ -9,6 +9,7 @@ The harness ships with loaders and Lightning datamodules for four datasets. Each
 | KuaiRec | `kuairec` | `small_matrix` | Zenodo auto-download | `kuairec_ctr` |
 | KuaiRand | `kuairand` | `pure` | Zenodo auto-download | `kuairand_ctr` |
 | Amazon Reviews 2023 | `amazon` | `all_beauty` | Hugging Face Hub auto-download | `amazon_ctr`, `amazon_seq` |
+| Frappe (NFM mirror) | `frappe` | _(single)_ | GitHub raw auto-download | `frappe_ctr` |
 
 All loaders default their on-disk cache to the repo-root `./datasets/` directory via `Path(__file__).resolve().parents[3] / "datasets"`, so calls succeed regardless of CWD. The two acquisition helpers — [`http_download_atomic`](../src/recsys/data/_download.py) (Zenodo) and [`fetch_hf_dataset`](../src/recsys/data/_download.py) (HF Hub) — handle caching, partial-download protection, and integrity checks.
 
@@ -75,3 +76,15 @@ All loaders default their on-disk cache to the repo-root `./datasets/` directory
 ### Caveats for Books / Electronics
 
 Neither `books` nor `electronics` is practical on a laptop without `max_rows`. Pick a row cap (e.g. 200K) and expect the first run to spend most of its time in the HF Hub download, not the benchmark itself. The JSONL files are not chunked on disk, so polars holds the full selected-column slice in memory during `load`; budget accordingly.
+
+## Frappe (NFM mirror)
+
+- Original homepage: https://www.baltrunas.info/context-aware/frappe (Baltrunas et al. 2015)
+- NFM mirror: https://github.com/hexiangnan/neural_factorization_machine/tree/master/data/frappe
+- Loader: [src/recsys/data/frappe.py](../src/recsys/data/frappe.py)
+- Datamodule: [src/recsys/data/datamodules/frappe.py](../src/recsys/data/datamodules/frappe.py)
+- Label: implicit click vs. NFM-sampled negative; libfm files use `1` / `-1`, the loader normalises to `1.0` / `0.0`.
+- Variants: only the NFM-prepared mirror (~288k rows across train + validation + test).
+- Acquisition: auto-download on first call from the NFM repo's raw GitHub URLs (~12 MB total). The combined frame is fed into the standard `CsvCtrBuilder`, which runs its own random train/val split — the NFM-supplied splits are concatenated rather than reused.
+- Fields: 10 categorical features in pinned order — `user_id, item_id, daytime, weekday, isweekend, homework, cost, weather, country, city`.
+- Used by: Wukong (one of its six small CTR datasets).

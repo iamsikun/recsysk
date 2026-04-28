@@ -1,0 +1,12 @@
+name: deepfm_on_frappe_ctr
+benchmark: conf/benchmarks/frappe_ctr.yaml
+algo: conf/algorithms/deepfm.yaml
+seeds: [1, 2, 3]
+trainer:
+  accelerator: auto
+  devices: 1
+  max_epochs: 1
+  limit_train_batches: 4
+  limit_val_batches: 4
+  enable_progress_bar: false
+  enable_checkpointing: false
