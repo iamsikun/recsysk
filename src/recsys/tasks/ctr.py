@@ -8,7 +8,7 @@ from typing import Any
 
 from recsys.algorithms.base import TaskType
 from recsys.evaluation import CTREvaluator
-from recsys.evaluation.evaluator import iter_predictions
+from recsys.evaluation.evaluator import CTR_METRIC_NAMES, iter_predictions
 from recsys.tasks.base import Task
 from recsys.utils import TASK_REGISTRY
 
@@ -51,7 +51,8 @@ class CTRTask(Task):
         # falls back to a fresh ``RandomUniform`` (legacy compat).
         negative_sampler = benchmark_data.metadata.get("negative_sampler")
 
-        evaluator = CTREvaluator()
+        ctr_metrics_requested = [m for m in metric_names if m in CTR_METRIC_NAMES]
+        evaluator = CTREvaluator(metrics=ctr_metrics_requested or None)
         full = evaluator.evaluate_full(
             model,
             datamodule,
