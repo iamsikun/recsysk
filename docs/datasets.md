@@ -13,6 +13,7 @@ The harness ships with loaders and Lightning datamodules for four datasets. Each
 | TaobaoAd (Tianchi) | `taobao_ad` | _(single)_ | Local (manual extract to `./datasets/taobao_ad/`) | `taobao_ad_ctr` |
 | MicroVideo (THACIL) | `microvideo` | _(single)_ | Local (manual extract to `./datasets/microvideo_thacil/`) | `microvideo_ctr` |
 | KuaiVideo (BARS / reczoo HF) | `kuaivideo` | _(single)_ | Hugging Face Hub auto-download | `kuaivideo_ctr` |
+| Criteo Terabyte (24-day) | `criteo_terabyte` | `day_0` | Hugging Face Hub auto-download | `criteo_terabyte_ctr` |
 
 All loaders default their on-disk cache to the repo-root `./datasets/` directory via `Path(__file__).resolve().parents[3] / "datasets"`, so calls succeed regardless of CWD. The two acquisition helpers — [`http_download_atomic`](../src/recsys/data/_download.py) (Zenodo) and [`fetch_hf_dataset`](../src/recsys/data/_download.py) (HF Hub) — handle caching, partial-download protection, and integrity checks.
 
@@ -130,3 +131,17 @@ Neither `books` nor `electronics` is practical on a laptop without `max_rows`. P
 - Acquisition: HF Hub via `fetch_hf_dataset`. The loader pulls `*.csv` only (drops the optional 2048-d visual embedding for v1) and symlinks the BARS train/valid/test CSVs into `./datasets/KuaiVideo_x1/`. The harness's `CsvCtrBuilder` then concatenates the three CSVs and runs its own random train/val split — the BARS-supplied splits are not preserved.
 - Memory note: ~2.27 GB CSV; budget ~5–6 GB peak after polars load. Use `data.max_rows: 1_000_000` (added in PR8) for laptop-friendly smoke runs.
 - Used by: InterFormer.
+
+## Criteo Terabyte (24-day click logs)
+
+- HF Hub mirror: https://huggingface.co/datasets/criteo/CriteoClickLogs (CC-BY-NC-SA-4.0)
+- Criteo AI Lab portal: https://ailab.criteo.com/download-criteo-1tb-click-logs-dataset/ (alive in 2026; underlying URLs rot frequently — prefer the HF mirror).
+- Loader: [src/recsys/data/criteo_terabyte.py](../src/recsys/data/criteo_terabyte.py)
+- Datamodule: [src/recsys/data/datamodules/criteo_terabyte.py](../src/recsys/data/datamodules/criteo_terabyte.py)
+- Label: `label` (already 0/1 per the original logs).
+- Schema (per shard, TSV, no header): `label  int_1..13  cat_1..26`.
+- Variants: any subset of `day_0..day_23` via `data.days: ["day_0"]` (default in the smoke YAML). Each day is ~57 GB gzipped / ~150 GB uncompressed; the full dataset is ~1.3 TB / ~4.4B rows.
+- Acquisition: HF Hub via `fetch_hf_dataset` with `allow_patterns=["day_X.gz"]`. The loader gunzips into `./datasets/CriteoClickLogs/day_X.tsv` once, then memoises.
+- **Memory caveat:** running this end-to-end requires `data.max_rows`. The shipped smoke YAML pins `max_rows: 1_000_000`, which keeps the in-memory polars frame under ~200 MB. The new `max_rows` knob lives on `CsvCtrConfig` and is honoured in both the loader (read-time `n_rows`) and the builder (post-load `df.head`); the lower of the two wins.
+- Default features: the smoke YAML exposes only `cat_1` (as `user_id`) and `cat_2` (as `item_id`) — placeholders, since Criteo's hashed categoricals carry no semantic role. To push past the smoke gate, opt the remaining `int_*` and `cat_*` columns into the benchmark YAML's `features:` list.
+- Used by: Wukong (its largest public anchor).

@@ -8,6 +8,7 @@ Importing this package registers the built-in benchmarks
 from recsys.benchmarks.amazon_ctr import AmazonCTRBenchmark
 from recsys.benchmarks.amazon_seq import AmazonSeqBenchmark
 from recsys.benchmarks.base import Benchmark, BenchmarkData
+from recsys.benchmarks.criteo_terabyte_ctr import CriteoTerabyteCTRBenchmark
 from recsys.benchmarks.frappe_ctr import FrappeCTRBenchmark
 from recsys.benchmarks.kuairand_ctr import KuaiRandCTRBenchmark
 from recsys.benchmarks.kuairec_ctr import KuaiRecCTRBenchmark
@@ -22,6 +23,7 @@ __all__ = [
     "AmazonSeqBenchmark",
     "Benchmark",
     "BenchmarkData",
+    "CriteoTerabyteCTRBenchmark",
     "FrappeCTRBenchmark",
     "KuaiRandCTRBenchmark",
     "KuaiRecCTRBenchmark",

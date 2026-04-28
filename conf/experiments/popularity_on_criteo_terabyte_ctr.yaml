@@ -1,0 +1,6 @@
+name: popularity_on_criteo_terabyte_ctr
+benchmark: conf/benchmarks/criteo_terabyte_ctr.yaml
+algo: conf/algorithms/popularity.yaml
+seeds: [1, 2, 3]
+trainer:
+  limit_val_batches: 4
