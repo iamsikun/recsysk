@@ -1,0 +1,13 @@
+name: kuaivideo_ctr
+data:
+  name: kuaivideo
+  data_base_path: "./datasets"
+  train_split: 0.8
+  label_column: is_click
+  batch_size: 4096
+  features:
+    - {name: user_id, source_name: user_id, type: CATEGORICAL, role: user}
+    - {name: item_id, source_name: item_id, type: CATEGORICAL, role: item}
+eval:
+  n_negatives: 100
+  seed: 42
