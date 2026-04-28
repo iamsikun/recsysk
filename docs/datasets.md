@@ -10,6 +10,7 @@ The harness ships with loaders and Lightning datamodules for four datasets. Each
 | KuaiRand | `kuairand` | `pure` | Zenodo auto-download | `kuairand_ctr` |
 | Amazon Reviews 2023 | `amazon` | `all_beauty` | Hugging Face Hub auto-download | `amazon_ctr`, `amazon_seq` |
 | Frappe (NFM mirror) | `frappe` | _(single)_ | GitHub raw auto-download | `frappe_ctr` |
+| TaobaoAd (Tianchi) | `taobao_ad` | _(single)_ | Local (manual extract to `./datasets/taobao_ad/`) | `taobao_ad_ctr` |
 
 All loaders default their on-disk cache to the repo-root `./datasets/` directory via `Path(__file__).resolve().parents[3] / "datasets"`, so calls succeed regardless of CWD. The two acquisition helpers — [`http_download_atomic`](../src/recsys/data/_download.py) (Zenodo) and [`fetch_hf_dataset`](../src/recsys/data/_download.py) (HF Hub) — handle caching, partial-download protection, and integrity checks.
 
@@ -88,3 +89,18 @@ Neither `books` nor `electronics` is practical on a laptop without `max_rows`. P
 - Acquisition: auto-download on first call from the NFM repo's raw GitHub URLs (~12 MB total). The combined frame is fed into the standard `CsvCtrBuilder`, which runs its own random train/val split — the NFM-supplied splits are concatenated rather than reused.
 - Fields: 10 categorical features in pinned order — `user_id, item_id, daytime, weekday, isweekend, homework, cost, weather, country, city`.
 - Used by: Wukong (one of its six small CTR datasets).
+
+## TaobaoAd (Tianchi Ad Display Dataset)
+
+- Homepage: https://tianchi.aliyun.com/dataset/56
+- Loader: [src/recsys/data/taobao_ad.py](../src/recsys/data/taobao_ad.py)
+- Datamodule: [src/recsys/data/datamodules/taobao_ad.py](../src/recsys/data/datamodules/taobao_ad.py)
+- Label: `clk` (already binary 0/1, no thresholding).
+- Acquisition: **manual**. Tianchi requires an Aliyun login to download; v1 does not auto-download. Extract the four CSVs under `./datasets/taobao_ad/`:
+  - `raw_sample.csv` — 26M impression rows (`user, time_stamp, adgroup_id, pid, nonclk, clk`)
+  - `ad_feature.csv` — ad metadata (`adgroup_id, cate_id, campaign_id, customer, brand, price`)
+  - `user_profile.csv` — user demographics (`userid, cms_segid, cms_group_id, final_gender_code, age_level, pvalue_level, shopping_level, occupation, new_user_class_level`)
+  - `behavior_log.csv` — historical user-on-category interactions (large; only loaded when explicitly requested)
+- Joined view: `taobao_ad.load(join=True)` returns the impression log left-joined against ad and user metadata, ready for the standard `CsvCtrBuilder` path.
+- Memory note: the joined frame is materialised in memory by `CsvCtrBuilder` before splitting (~26M rows; budget several GB). Use the `max_rows` knob added in PR8 if you need to fit a smaller machine.
+- Used by: InterFormer, Wukong, BST.
