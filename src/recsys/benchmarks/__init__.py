@@ -13,6 +13,7 @@ from recsys.benchmarks.kuairand_ctr import KuaiRandCTRBenchmark
 from recsys.benchmarks.kuairec_ctr import KuaiRecCTRBenchmark
 from recsys.benchmarks.movielens_ctr import MovieLensCTRBenchmark
 from recsys.benchmarks.movielens_seq import MovieLensSeqBenchmark
+from recsys.benchmarks.taobao_ad_ctr import TaobaoAdCTRBenchmark
 
 __all__ = [
     "AmazonCTRBenchmark",
@@ -24,4 +25,5 @@ __all__ = [
     "KuaiRecCTRBenchmark",
     "MovieLensCTRBenchmark",
     "MovieLensSeqBenchmark",
+    "TaobaoAdCTRBenchmark",
 ]
