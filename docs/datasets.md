@@ -11,6 +11,7 @@ The harness ships with loaders and Lightning datamodules for four datasets. Each
 | Amazon Reviews 2023 | `amazon` | `all_beauty` | Hugging Face Hub auto-download | `amazon_ctr`, `amazon_seq` |
 | Frappe (NFM mirror) | `frappe` | _(single)_ | GitHub raw auto-download | `frappe_ctr` |
 | TaobaoAd (Tianchi) | `taobao_ad` | _(single)_ | Local (manual extract to `./datasets/taobao_ad/`) | `taobao_ad_ctr` |
+| MicroVideo (THACIL) | `microvideo` | _(single)_ | Local (manual extract to `./datasets/microvideo_thacil/`) | `microvideo_ctr` |
 
 All loaders default their on-disk cache to the repo-root `./datasets/` directory via `Path(__file__).resolve().parents[3] / "datasets"`, so calls succeed regardless of CWD. The two acquisition helpers — [`http_download_atomic`](../src/recsys/data/_download.py) (Zenodo) and [`fetch_hf_dataset`](../src/recsys/data/_download.py) (HF Hub) — handle caching, partial-download protection, and integrity checks.
 
@@ -104,3 +105,15 @@ Neither `books` nor `electronics` is practical on a laptop without `max_rows`. P
 - Joined view: `taobao_ad.load(join=True)` returns the impression log left-joined against ad and user metadata, ready for the standard `CsvCtrBuilder` path.
 - Memory note: the joined frame is materialised in memory by `CsvCtrBuilder` before splitting (~26M rows; budget several GB). Use the `max_rows` knob added in PR8 if you need to fit a smaller machine.
 - Used by: InterFormer, Wukong, BST.
+
+## MicroVideo (THACIL)
+
+- Source repo: https://github.com/Ocxs/THACIL (Chen et al. 2018, ACM MM)
+- Loader: [src/recsys/data/microvideo.py](../src/recsys/data/microvideo.py)
+- Datamodule: [src/recsys/data/datamodules/microvideo.py](../src/recsys/data/datamodules/microvideo.py)
+- Label: implicit click vs. sampled negative (0/1).
+- Stats: 10,986 users / 1,704,880 items / 12,737,619 interactions.
+- Acquisition: **manual**. The THACIL release page is password-protected (the GitHub README lists the password as `ms7x`); v1 does not auto-download.
+  - The original release ships as pickled behaviour sequences + pre-extracted multimodal embeddings.
+  - For v1, convert that release to a tabular `interactions.csv` with columns `[user_id, item_id, label]` and place it at `./datasets/microvideo_thacil/interactions.csv`.
+- Used by: Wukong (one of its six public CTR datasets — distinct from InterFormer's KuaiVideo, which is the ALPINE 2019 release).

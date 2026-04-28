@@ -11,6 +11,7 @@ from recsys.benchmarks.base import Benchmark, BenchmarkData
 from recsys.benchmarks.frappe_ctr import FrappeCTRBenchmark
 from recsys.benchmarks.kuairand_ctr import KuaiRandCTRBenchmark
 from recsys.benchmarks.kuairec_ctr import KuaiRecCTRBenchmark
+from recsys.benchmarks.microvideo_ctr import MicroVideoCTRBenchmark
 from recsys.benchmarks.movielens_ctr import MovieLensCTRBenchmark
 from recsys.benchmarks.movielens_seq import MovieLensSeqBenchmark
 from recsys.benchmarks.taobao_ad_ctr import TaobaoAdCTRBenchmark
@@ -23,6 +24,7 @@ __all__ = [
     "FrappeCTRBenchmark",
     "KuaiRandCTRBenchmark",
     "KuaiRecCTRBenchmark",
+    "MicroVideoCTRBenchmark",
     "MovieLensCTRBenchmark",
     "MovieLensSeqBenchmark",
     "TaobaoAdCTRBenchmark",
