@@ -1,0 +1,6 @@
+name: popularity_on_movielens_1m_ctr
+benchmark: conf/benchmarks/movielens_1m_ctr.yaml
+algo: conf/algorithms/popularity.yaml
+seeds: [1, 2, 3]
+trainer:
+  limit_val_batches: 4
