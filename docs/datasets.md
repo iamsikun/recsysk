@@ -5,6 +5,7 @@ The harness ships with loaders and Lightning datamodules for four datasets. Each
 | Dataset | Registry key | Default variant / category | Acquisition | Pinned benchmarks |
 |---|---|---|---|---|
 | MovieLens 20m | `movielens` | `20m` | Local (manual extract to `./datasets/ml-20m/`) | `movielens_ctr`, `movielens_seq` |
+| MovieLens 1m | `movielens` | `1m` | Local (manual extract to `./datasets/ml-1m/`) | `movielens_ctr` (via the `movielens_1m_ctr.yaml` config) |
 | KuaiRec | `kuairec` | `small_matrix` | Zenodo auto-download | `kuairec_ctr` |
 | KuaiRand | `kuairand` | `pure` | Zenodo auto-download | `kuairand_ctr` |
 | Amazon Reviews 2023 | `amazon` | `all_beauty` | Hugging Face Hub auto-download | `amazon_ctr`, `amazon_seq` |
@@ -17,8 +18,21 @@ All loaders default their on-disk cache to the repo-root `./datasets/` directory
 - Loader: [src/recsys/data/loaders/movielens.py](../src/recsys/data/loaders/movielens.py)
 - Datamodule: [src/recsys/data/datamodules/movielens.py](../src/recsys/data/datamodules/movielens.py)
 - Label: `rating >= 4` (binary, MovieLens' classical threshold).
-- Variants: the loader accepts a `dataset_size` field (`"20m"` is the only one wired up in v1).
+- Variants: the loader accepts a `dataset_size` field — `"20m"`, `"10m"`, and `"1m"` are wired in v1. See "MovieLens 1m" below for the smaller variant used by Wukong / HSTU.
 - Acquisition: **manual**. v1 does not auto-download MovieLens. Extract the `ml-20m.zip` archive into `./datasets/ml-20m/` yourself before running the MovieLens benchmarks.
+
+## MovieLens 1m
+
+- Homepage: https://grouplens.org/datasets/movielens/1m/
+- Loader: same `loaders/movielens.py` (variant config at [movielens.py:124–172](../src/recsys/data/loaders/movielens.py)).
+- Datamodule: same as MovieLens 20m.
+- Label: `rating >= 4` (same threshold as 20m).
+- Format on disk: `::`-separated `.dat` files. Expected layout under `./datasets/ml-1m/`:
+  - `ratings.dat` — `user_id::item_id::rating::timestamp`
+  - `users.dat` — `user_id::gender::age::occupation::zip_code`
+  - `movies.dat` — `item_id::title::genres` (encoded `latin-1`)
+- Acquisition: **manual**. Download `ml-1m.zip` from https://files.grouplens.org/datasets/movielens/ml-1m.zip and extract under `./datasets/ml-1m/`. v1 does not auto-download.
+- Benchmark configs: [conf/benchmarks/movielens_1m_ctr.yaml](../conf/benchmarks/movielens_1m_ctr.yaml). Run with `uv run recsys bench --experiment conf/experiments/deepfm_on_movielens_1m_ctr.yaml --seeds 1`.
 
 ## KuaiRec
 
