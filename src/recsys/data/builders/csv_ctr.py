@@ -46,6 +46,13 @@ class CsvCtrConfig:
         new ``label`` column is appended). If ``None``, ``label_column`` is
         copied verbatim into the ``label`` column (cast to float32). Use
         ``None`` for already-binary clicks (KuaiRand ``is_click``).
+    max_rows:
+        Optional hard cap on the loaded DataFrame, applied as
+        ``df.head(max_rows)`` before label thresholding and feature
+        encoding. Mirrors the deterministic time-ordered prefix used by
+        the Amazon loader's own ``max_rows`` knob; required for huge
+        datasets like Criteo Terabyte where the full frame doesn't fit
+        in memory.
     """
 
     load_df: Callable[[], pl.DataFrame]
@@ -54,6 +61,7 @@ class CsvCtrConfig:
     seed: int | None
     label_column: str
     label_threshold: float | None
+    max_rows: int | None = None
 
 
 class CsvCtrBuilder(DatasetBuilder):
@@ -69,6 +77,8 @@ class CsvCtrBuilder(DatasetBuilder):
 
     def build(self) -> DatasetBundle:
         df = self.config.load_df()
+        if self.config.max_rows is not None:
+            df = df.head(self.config.max_rows)
         if self.config.label_threshold is not None:
             df = apply_label_threshold(
                 df,
